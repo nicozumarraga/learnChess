@@ -9,7 +9,7 @@ The app icon source is [`Assets/AppIcon.png`](Assets/AppIcon.png); `scripts/buil
 - Legal chess moves, checkmate and stalemate detection, SAN move list, board navigation, and saved games that reopen at the last move.
 - Stockfish play with a selectable 1320–3190 engine Elo setting, plus full strength analysis, best move, score, and win/draw/loss estimate.
 - Best move arrows on the board, including an L-shaped arrow for knight moves.
-- Optional live help shows Stockfish's preferred move after you play, on the position before your move. Use **Show hint** to reveal it early. Games played without live help keep hints and coaching unavailable until the game ends. Assisted games do not change the local rating.
+- Optional live help prepares a comparison after you move. Select **Review last move** to reveal the earlier position and arrow in a small review board; the main board stays playable. **Show hint** reveals the current best move before you play. Games without live help keep hints and coaching unavailable until completion. Assisted games do not change the local rating.
 - A local rating updated after completed, unassisted games. This is a personal progress indicator, not an official Elo rating.
 - A collapsible sidebar and compact Focus view with a large board, recent moves, and a small status panel.
 - Optional Codex coach with four question shortcuts and a custom question. The app sends the current FEN, moves, and available engine results as text using `codex exec --ephemeral --sandbox read-only`.

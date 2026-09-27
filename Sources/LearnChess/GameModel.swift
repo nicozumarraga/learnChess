@@ -12,7 +12,9 @@ struct MoveInsight: Codable, Sendable {
 struct PostMoveReview: Sendable {
     let played: String
     let best: String
-    var matched: Bool { played == best }
+    let matched: Bool
+    let position: ChessBoard
+    let analysis: EngineReply
 }
 
 struct SavedMove: Codable, Identifiable, Sendable {
@@ -85,7 +87,7 @@ enum GameStorage {
 }
 
 @MainActor final class GameModel: ObservableObject {
-    @Published var data = GameStorage.load()
+    @Published var data: LocalData
     @Published var activeID: UUID?
     @Published var cursor = 0
     @Published var board = ChessBoard.initial
@@ -93,6 +95,7 @@ enum GameStorage {
     @Published var promotionChoices: [ChessMove] = []
     @Published var analysis: EngineReply?
     @Published var postMoveReview: PostMoveReview?
+    @Published var isReviewVisible = false
     @Published var coachAnswer = ""
     @Published var coachQuestion = ""
     @Published var isThinking = false
@@ -102,10 +105,13 @@ enum GameStorage {
     @Published var panel: Panel = .play
     @Published var isFocusMode = false
     @Published var sidebarCollapsed = false
+    private let autosave: Bool
     enum Panel: String, CaseIterable { case play = "Play", library = "Library", settings = "Settings" }
 
-    init() {
-        if let game = data.games.max(by: { $0.updatedAt < $1.updatedAt }) { open(game.id) }
+    init(data: LocalData? = nil, autosave: Bool = true) {
+        self.data = data ?? GameStorage.load()
+        self.autosave = autosave
+        if let game = self.data.games.max(by: { $0.updatedAt < $1.updatedAt }) { open(game.id) }
         else { newGame() }
     }
 
@@ -123,6 +129,7 @@ enum GameStorage {
     }
 
     func persist() {
+        guard autosave else { return }
         do { try GameStorage.save(data) } catch { message = "Could not save games: \(error.localizedDescription)" }
     }
 
@@ -136,6 +143,7 @@ enum GameStorage {
         promotionChoices = []
         analysis = nil
         postMoveReview = nil
+        isReviewVisible = false
         coachAnswer = ""
         isThinking = false
         panel = .play
@@ -151,6 +159,7 @@ enum GameStorage {
         coachAnswer = ""
         analysis = nil
         postMoveReview = nil
+        isReviewVisible = false
         isThinking = false
         promotionChoices = []
         if data.games[index].result == nil && board.turn == .black { resumeEngineTurn() }
@@ -161,6 +170,7 @@ enum GameStorage {
         reconstructBoard()
         analysis = nil
         postMoveReview = nil
+        isReviewVisible = false
         selectedSquare = nil
         promotionChoices = []
     }
@@ -217,12 +227,14 @@ enum GameStorage {
     private func makeHumanMove(_ move: ChessMove) {
         guard hasEngine else { message = EngineError.unavailable.localizedDescription; return }
         let beforeMoves = game?.moves.map(\.uci) ?? []
+        let beforeBoard = board
         let isAssisted = game?.liveHelp == true
         append(move)
         guard game?.result == nil else { return }
         isThinking = true
         analysis = nil
         postMoveReview = nil
+        isReviewVisible = false
         let afterMoves = game?.moves.map(\.uci) ?? []
         let enginePath = data.enginePath
         let opponentElo = game?.opponentElo ?? data.opponentElo
@@ -257,12 +269,9 @@ enum GameStorage {
                 append(move)
                 isThinking = false
                 if game?.liveHelp == true, let before = review?.0, let bestUCI = before.bestMove {
-                    cursor = beforeMoves.count
-                    reconstructBoard()
-                    analysis = before
-                    let bestSAN = ChessBoard.move(bestUCI).map { board.san(for: $0) } ?? bestUCI
-                    postMoveReview = PostMoveReview(played: playedSAN, best: bestSAN)
-                    if playedUCI == bestUCI { postMoveReview = PostMoveReview(played: playedSAN, best: playedSAN) }
+                    let bestSAN = ChessBoard.move(bestUCI).map { beforeBoard.san(for: $0) } ?? bestUCI
+                    postMoveReview = PostMoveReview(played: playedSAN, best: playedUCI == bestUCI ? playedSAN : bestSAN,
+                                                    matched: playedUCI == bestUCI, position: beforeBoard, analysis: before)
                 }
             } catch {
                 isThinking = false
@@ -275,6 +284,10 @@ enum GameStorage {
         guard hasEngine, !isThinking, board.turn == .black else { return }
         let moves = game?.moves.map(\.uci) ?? []
         let beforeMoves = Array(moves.dropLast())
+        var beforeBoard = ChessBoard.initial
+        for uci in beforeMoves {
+            if let move = ChessBoard.move(uci) { _ = beforeBoard.apply(move) }
+        }
         let id = activeID
         let path = data.enginePath
         let elo = game?.opponentElo ?? data.opponentElo
@@ -296,11 +309,9 @@ enum GameStorage {
                 append(move)
                 isThinking = false
                 if game?.liveHelp == true, let before, let bestUCI = before.bestMove {
-                    cursor = beforeMoves.count
-                    reconstructBoard()
-                    analysis = before
-                    let bestSAN = ChessBoard.move(bestUCI).map { board.san(for: $0) } ?? bestUCI
-                    postMoveReview = PostMoveReview(played: playedSAN, best: playedUCI == bestUCI ? playedSAN : bestSAN)
+                    let bestSAN = ChessBoard.move(bestUCI).map { beforeBoard.san(for: $0) } ?? bestUCI
+                    postMoveReview = PostMoveReview(played: playedSAN, best: playedUCI == bestUCI ? playedSAN : bestSAN,
+                                                    matched: playedUCI == bestUCI, position: beforeBoard, analysis: before)
                 }
             } catch {
                 isThinking = false
@@ -315,6 +326,7 @@ enum GameStorage {
             data.games[index].liveHelp = false
             analysis = nil
             postMoveReview = nil
+            isReviewVisible = false
             coachAnswer = ""
             if !isAtEnd { go(to: data.games[index].moves.count) }
         } else {

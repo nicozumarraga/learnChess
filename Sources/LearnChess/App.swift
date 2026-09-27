@@ -221,7 +221,7 @@ private struct PlayView: View {
                 Spacer()
                 Text(model.game?.result ?? "Live").font(.system(size: 11, weight: .semibold)).foregroundStyle(Theme.accent)
             }
-            Text(model.postMoveReview != nil ? "Review your last move, then continue the game." : model.game?.result == nil ? (model.isAtEnd ? (model.isThinking ? "Stockfish is choosing a move…" : "Your move. Take your time.") : "Reviewing an earlier position") : "Review your game and learn from it.")
+            Text(model.game?.result == nil ? (model.isAtEnd ? (model.isThinking ? "Stockfish is choosing a move…" : model.postMoveReview != nil ? "Your move. Last-move review is ready." : "Your move. Take your time.") : "Reviewing an earlier position") : "Review your game and learn from it.")
                 .font(.system(size: 15, weight: .medium))
             if !model.hasEngine {
                 Text("Stockfish is not configured. Set its executable path in Settings.")
@@ -281,14 +281,18 @@ private struct PlayView: View {
                     .font(.system(size: 12)).foregroundStyle(Theme.muted)
             } else {
                 if let review = model.postMoveReview {
-                    Text(review.matched ? "You found Stockfish’s preferred move: \(review.played)." : "You played \(review.played). Stockfish preferred \(review.best).")
-                        .font(.system(size: 12, weight: .medium))
-                    Text("The arrow shows the position before your move.")
-                        .font(.system(size: 11)).foregroundStyle(Theme.muted)
-                    Button("Continue game") { model.go(to: model.game?.moves.count ?? 0) }
+                    Button(model.isReviewVisible ? "Hide last-move review" : "Review last move") { model.isReviewVisible.toggle() }
                         .buttonStyle(SubtleButton())
+                    if model.isReviewVisible {
+                        Text(review.matched ? "You found Stockfish’s preferred move: \(review.played)." : "You played \(review.played). Stockfish preferred \(review.best).")
+                            .font(.system(size: 12, weight: .medium))
+                        ChessBoardView(previewBoard: review.position, previewMove: ChessBoard.move(review.analysis.bestMove ?? ""), interactive: false)
+                            .frame(width: 250, height: 250)
+                            .frame(maxWidth: .infinity)
+                        Text("Earlier position · board remains playable").font(.system(size: 11)).foregroundStyle(Theme.muted)
+                    }
                 } else if model.game?.liveHelp == true && model.analysis == nil {
-                    Text(model.isThinking ? "Comparing your move with full-strength Stockfish…" : "Move first to see what Stockfish preferred, or request a hint now.")
+                    Text(model.isThinking ? "Comparing your move with full-strength Stockfish…" : "Play normally, or request a hint before moving.")
                         .font(.system(size: 12)).foregroundStyle(Theme.muted)
                 }
                 if let analysis = model.analysis {
@@ -298,7 +302,7 @@ private struct PlayView: View {
                         Text("Depth \(analysis.depth)").font(.system(size: 11)).foregroundStyle(Theme.muted)
                     }
                     HStack {
-                        Text(model.postMoveReview?.matched == false ? "Better move" : "Best move").foregroundStyle(Theme.muted)
+                        Text("Best move").foregroundStyle(Theme.muted)
                         Spacer()
                         Text(analysis.bestMove ?? "—").font(.system(size: 13, design: .monospaced))
                     }.font(.system(size: 12))
@@ -394,7 +398,7 @@ private struct FocusPlayView: View {
                     Text("YOU").font(.system(size: 11, weight: .bold)).tracking(1.2)
                     Text("\(model.data.rating)").font(.system(size: 11)).foregroundStyle(Theme.muted)
                     Spacer()
-                    Text(model.postMoveReview != nil ? "Last move review" : model.game?.result ?? (model.board.turn == .white ? "Your move" : "Thinking…"))
+                    Text(model.game?.result ?? (model.board.turn == .white ? "Your move" : "Thinking…"))
                         .font(.system(size: 11, weight: .medium)).foregroundStyle(Theme.accent)
                 }
             }
@@ -408,7 +412,7 @@ private struct FocusPlayView: View {
                 .foregroundStyle(Theme.accent)
                 Text("MOVE \((model.cursor + 1) / 2)")
                     .font(.system(size: 10, weight: .bold)).tracking(1.5).foregroundStyle(Theme.muted)
-                Text(model.postMoveReview != nil ? "Review your move" : model.isThinking ? "Stockfish is thinking" : model.game?.result == nil ? "Find your best move" : "Game complete")
+                Text(model.isThinking ? "Stockfish is thinking" : model.game?.result == nil ? "Find your best move" : "Game complete")
                     .font(.system(size: 16, weight: .semibold, design: .rounded))
                 HStack(spacing: 12) {
                     Button { model.go(to: model.cursor - 1) } label: { Image(systemName: "chevron.left") }
@@ -443,10 +447,14 @@ private struct FocusPlayView: View {
                 }
                 if let review = model.postMoveReview {
                     Divider().overlay(Theme.border)
-                    Text(review.matched ? "You found the best move." : "\(review.played) → \(review.best)")
-                        .font(.system(size: 12, weight: .medium))
-                    Button("Continue game") { model.go(to: model.game?.moves.count ?? 0) }
+                    Button(model.isReviewVisible ? "Hide review" : "Review last move") { model.isReviewVisible.toggle() }
                         .buttonStyle(.plain).font(.system(size: 12, weight: .semibold)).foregroundStyle(Theme.accent)
+                    if model.isReviewVisible {
+                        Text(review.matched ? "You found the best move." : "\(review.played) → \(review.best)")
+                            .font(.system(size: 12, weight: .medium))
+                        ChessBoardView(previewBoard: review.position, previewMove: ChessBoard.move(review.analysis.bestMove ?? ""), interactive: false)
+                            .frame(width: 144, height: 144)
+                    }
                 }
                 if let analysis = model.analysis {
                     Divider().overlay(Theme.border)
@@ -464,7 +472,7 @@ private struct FocusPlayView: View {
                     Button("Analyze position") { model.requestAnalysis() }
                         .buttonStyle(.plain).font(.system(size: 11, weight: .medium)).foregroundStyle(Theme.accent)
                 } else if model.game?.liveHelp == true {
-                    Text(model.isThinking ? "Analyzing your move…" : "Move first to see the better line.")
+                    Text(model.isThinking ? "Analyzing your move…" : "No hint shown.")
                         .font(.system(size: 11)).foregroundStyle(Theme.muted)
                 } else {
                     Text("Hints are off.").font(.system(size: 11)).foregroundStyle(Theme.muted)
@@ -484,23 +492,28 @@ private struct FocusPlayView: View {
 
 private struct ChessBoardView: View {
     @EnvironmentObject var model: GameModel
+    var previewBoard: ChessBoard? = nil
+    var previewMove: ChessMove? = nil
+    var interactive = true
+
     var body: some View {
         GeometryReader { geo in
             let size = min(geo.size.width, geo.size.height)
             let tile = size / 8
+            let displayedBoard = previewBoard ?? model.board
             VStack(spacing: 0) {
                 ForEach((0..<8).reversed(), id: \.self) { rank in
                     HStack(spacing: 0) {
                         ForEach(0..<8, id: \.self) { file in
                             let square = rank * 8 + file
-                            Button { model.select(square) } label: {
+                            Button { if interactive { model.select(square) } } label: {
                                 ZStack {
                                     Rectangle().fill((rank + file).isMultiple(of: 2) ? Theme.darkSquare : Theme.lightSquare)
-                                    if model.selectedSquare == square { Rectangle().fill(Color.yellow.opacity(0.35)) }
-                                    if model.legalTargets.contains(square) {
+                                    if interactive && model.selectedSquare == square { Rectangle().fill(Color.yellow.opacity(0.35)) }
+                                    if interactive && model.legalTargets.contains(square) {
                                         Circle().fill(Color.black.opacity(0.23)).frame(width: tile * 0.24)
                                     }
-                                    if let piece = model.board.squares[square] {
+                                    if let piece = displayedBoard.squares[square] {
                                         ChessPieceView(piece: piece)
                                             .frame(width: tile * 0.79, height: tile * 0.79)
                                     }
@@ -528,9 +541,9 @@ private struct ChessBoardView: View {
             .overlay(RoundedRectangle(cornerRadius: 12).stroke(Theme.border, lineWidth: 1))
             .frame(width: size, height: size)
             .overlay {
-                if let uci = model.analysis?.bestMove,
-                   let move = ChessBoard.move(uci), model.board.legalMoves.contains(move) {
-                    BestMoveArrow(move: move, isKnight: model.board.squares[move.from]?.kind == .knight, size: size)
+                if let move = previewBoard == nil ? ChessBoard.move(model.analysis?.bestMove ?? "") : previewMove,
+                   displayedBoard.legalMoves.contains(move) {
+                    BestMoveArrow(move: move, isKnight: displayedBoard.squares[move.from]?.kind == .knight, size: size)
                         .allowsHitTesting(false)
                 }
             }
