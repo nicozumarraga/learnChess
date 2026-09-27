@@ -9,6 +9,12 @@ struct MoveInsight: Codable, Sendable {
     var afterWDL: [Int]?
 }
 
+struct PostMoveReview: Sendable {
+    let played: String
+    let best: String
+    var matched: Bool { played == best }
+}
+
 struct SavedMove: Codable, Identifiable, Sendable {
     var id = UUID()
     var uci: String
@@ -86,6 +92,7 @@ enum GameStorage {
     @Published var selectedSquare: Int?
     @Published var promotionChoices: [ChessMove] = []
     @Published var analysis: EngineReply?
+    @Published var postMoveReview: PostMoveReview?
     @Published var coachAnswer = ""
     @Published var coachQuestion = ""
     @Published var isThinking = false
@@ -106,6 +113,9 @@ enum GameStorage {
     var game: SavedGame? { activeIndex.map { data.games[$0] } }
     var isAtEnd: Bool { cursor == (game?.moves.count ?? 0) }
     var canPlay: Bool { isAtEnd && board.turn == .white && game?.result == nil && !isThinking }
+    var canRequestHint: Bool { game?.liveHelp == true && canPlay && !isAnalyzing }
+    var canAnalyzePosition: Bool { game?.liveHelp == true || game?.result != nil }
+    var canUseCoach: Bool { data.coachEnabled && canAnalyzePosition }
     var hasEngine: Bool { FileManager.default.isExecutableFile(atPath: data.enginePath) }
     var legalTargets: Set<Int> {
         guard let selectedSquare else { return [] }
@@ -125,6 +135,7 @@ enum GameStorage {
         selectedSquare = nil
         promotionChoices = []
         analysis = nil
+        postMoveReview = nil
         coachAnswer = ""
         isThinking = false
         panel = .play
@@ -139,9 +150,9 @@ enum GameStorage {
         panel = .play
         coachAnswer = ""
         analysis = nil
+        postMoveReview = nil
         isThinking = false
         promotionChoices = []
-        if game?.liveHelp == true { requestAnalysis() }
         if data.games[index].result == nil && board.turn == .black { resumeEngineTurn() }
     }
 
@@ -149,6 +160,7 @@ enum GameStorage {
         cursor = max(0, min(ply, game?.moves.count ?? 0))
         reconstructBoard()
         analysis = nil
+        postMoveReview = nil
         selectedSquare = nil
         promotionChoices = []
     }
@@ -210,30 +222,48 @@ enum GameStorage {
         guard game?.result == nil else { return }
         isThinking = true
         analysis = nil
+        postMoveReview = nil
         let afterMoves = game?.moves.map(\.uci) ?? []
         let enginePath = data.enginePath
         let opponentElo = game?.opponentElo ?? data.opponentElo
         let id = activeID
         Task {
             do {
-                let detail: MoveInsight? = try await Task.detached {
-                    guard isAssisted else { return nil }
-                    let before = try EngineRunner.search(path: enginePath, moves: beforeMoves, elo: nil)
-                    let after = try EngineRunner.search(path: enginePath, moves: afterMoves, elo: nil)
-                    return MoveInsight(bestMove: before.bestMove, beforeScore: before.scoreCentipawns, afterScore: after.scoreCentipawns.map { -$0 },
-                                       beforeWDL: before.wdl, afterWDL: after.wdl.map { [$0[2], $0[1], $0[0]] })
-                }.value
-                if activeID == id, let detail, let index = activeIndex, let last = data.games[index].moves.indices.last {
-                    data.games[index].moves[last].insight = detail
+                var review: (EngineReply, MoveInsight)?
+                if isAssisted {
+                    do {
+                        review = try await Task.detached {
+                            let before = try EngineRunner.search(path: enginePath, moves: beforeMoves, elo: nil)
+                            let after = try EngineRunner.search(path: enginePath, moves: afterMoves, elo: nil)
+                            let insight = MoveInsight(bestMove: before.bestMove, beforeScore: before.scoreCentipawns,
+                                                      afterScore: after.scoreCentipawns.map { -$0 }, beforeWDL: before.wdl,
+                                                      afterWDL: after.wdl.map { [$0[2], $0[1], $0[0]] })
+                            return (before, insight)
+                        }.value
+                    } catch { message = "Move review unavailable: \(error.localizedDescription)" }
+                }
+                if activeID == id, let review, let index = activeIndex, let last = data.games[index].moves.indices.last {
+                    data.games[index].moves[last].insight = review.1
                     persist()
                 }
                 let reply = try await Task.detached { try EngineRunner.search(path: enginePath, moves: afterMoves, elo: opponentElo, milliseconds: 900) }.value
                 guard activeID == id else { return }
                 guard game?.moves.map(\.uci) == afterMoves, let uci = reply.bestMove,
                       let move = ChessBoard.move(uci) else { throw EngineError.noMove }
+                let playedSAN = game?.moves.last?.san ?? "Your move"
+                let playedUCI = game?.moves.last?.uci
+                cursor = game?.moves.count ?? 0
+                reconstructBoard()
                 append(move)
                 isThinking = false
-                if game?.liveHelp == true { requestAnalysis() }
+                if game?.liveHelp == true, let before = review?.0, let bestUCI = before.bestMove {
+                    cursor = beforeMoves.count
+                    reconstructBoard()
+                    analysis = before
+                    let bestSAN = ChessBoard.move(bestUCI).map { board.san(for: $0) } ?? bestUCI
+                    postMoveReview = PostMoveReview(played: playedSAN, best: bestSAN)
+                    if playedUCI == bestUCI { postMoveReview = PostMoveReview(played: playedSAN, best: playedSAN) }
+                }
             } catch {
                 isThinking = false
                 message = error.localizedDescription
@@ -244,19 +274,34 @@ enum GameStorage {
     private func resumeEngineTurn() {
         guard hasEngine, !isThinking, board.turn == .black else { return }
         let moves = game?.moves.map(\.uci) ?? []
+        let beforeMoves = Array(moves.dropLast())
         let id = activeID
         let path = data.enginePath
         let elo = game?.opponentElo ?? data.opponentElo
+        let showReview = game?.liveHelp == true
         isThinking = true
         Task {
             do {
+                let before: EngineReply? = showReview ? try? await Task.detached {
+                    try EngineRunner.search(path: path, moves: beforeMoves, elo: nil)
+                }.value : nil
                 let reply = try await Task.detached { try EngineRunner.search(path: path, moves: moves, elo: elo, milliseconds: 900) }.value
                 guard activeID == id else { return }
                 guard game?.moves.map(\.uci) == moves, let uci = reply.bestMove,
                       let move = ChessBoard.move(uci) else { throw EngineError.noMove }
+                let playedSAN = game?.moves.last?.san ?? "Your move"
+                let playedUCI = game?.moves.last?.uci
+                cursor = game?.moves.count ?? 0
+                reconstructBoard()
                 append(move)
                 isThinking = false
-                if game?.liveHelp == true { requestAnalysis() }
+                if game?.liveHelp == true, let before, let bestUCI = before.bestMove {
+                    cursor = beforeMoves.count
+                    reconstructBoard()
+                    analysis = before
+                    let bestSAN = ChessBoard.move(bestUCI).map { board.san(for: $0) } ?? bestUCI
+                    postMoveReview = PostMoveReview(played: playedSAN, best: playedUCI == bestUCI ? playedSAN : bestSAN)
+                }
             } catch {
                 isThinking = false
                 message = error.localizedDescription
@@ -269,41 +314,42 @@ enum GameStorage {
         if data.games[index].liveHelp {
             data.games[index].liveHelp = false
             analysis = nil
+            postMoveReview = nil
+            coachAnswer = ""
+            if !isAtEnd { go(to: data.games[index].moves.count) }
         } else {
             data.games[index].assisted = true
             data.games[index].liveHelp = true
-            requestAnalysis()
         }
         persist()
     }
 
     func requestAnalysis() {
+        guard canAnalyzePosition else { return }
         guard hasEngine, !isAnalyzing else { if !hasEngine { message = EngineError.unavailable.localizedDescription }; return }
-        if let index = activeIndex, data.games[index].result == nil {
-            data.games[index].assisted = true
-            persist()
-        }
         let moves = game?.moves.prefix(cursor).map(\.uci) ?? []
         let enginePath = data.enginePath
+        let id = activeID
         isAnalyzing = true
         Task {
             do {
                 let result = try await Task.detached { try EngineRunner.search(path: enginePath, moves: moves, elo: nil, milliseconds: 1100) }.value
-                if game?.moves.prefix(cursor).map(\.uci) == moves { analysis = result }
+                if activeID == id && canAnalyzePosition && game?.moves.prefix(cursor).map(\.uci) == moves { analysis = result }
             } catch { message = error.localizedDescription }
             isAnalyzing = false
         }
     }
 
     func askCoach(_ shortcut: String? = nil) {
-        guard data.coachEnabled else { message = "Enable Codex coach in Settings."; return }
+        guard canUseCoach else { message = "Enable live help to use the coach during a game, or finish the game first."; return }
         guard !isAsking else { return }
         let question = shortcut ?? coachQuestion.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !question.isEmpty else { return }
         guard let game else { return }
         if let index = activeIndex { data.games[index].assisted = true; persist() }
         let history = game.moves.prefix(cursor).enumerated().map { "\($0.offset + 1). \($0.element.san) [\($0.element.uci)]" }.joined(separator: "\n")
-        let insights = game.moves.prefix(cursor).compactMap { move -> String? in
+        let inspectedCount = postMoveReview == nil ? cursor : min(cursor + 1, game.moves.count)
+        let insights = game.moves.prefix(inspectedCount).compactMap { move -> String? in
             guard let info = move.insight else { return nil }
             return "\(move.san): best=\(info.bestMove ?? "unknown"), before_cp=\(info.beforeScore.map(String.init) ?? "unknown"), after_cp=\(info.afterScore.map(String.init) ?? "unknown"), before_wdl=\(info.beforeWDL?.map(String.init).joined(separator: "/") ?? "unknown"), after_wdl=\(info.afterWDL?.map(String.init).joined(separator: "/") ?? "unknown")"
         }.joined(separator: "\n")
@@ -312,6 +358,7 @@ enum GameStorage {
 
         Question: \(question)
         Current board FEN: \(board.fen)
+        Most recent move review: \(postMoveReview.map { "played \($0.played), engine preferred \($0.best)" } ?? "none")
         Moves so far (SAN and UCI):
         \(history.isEmpty ? "Starting position" : history)
         Current full strength engine: best=\(analysis?.bestMove ?? "unavailable"), score=\(analysis?.scoreText ?? "unavailable") from side to move, WDL=\(analysis?.wdl?.map(String.init).joined(separator: "/") ?? "unavailable") per mille, PV=\(analysis?.principalVariation.joined(separator: " ") ?? "unavailable")

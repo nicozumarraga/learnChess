@@ -54,4 +54,6 @@ if !path.isEmpty {
     check(reply.bestMove != nil, "Stockfish replied")
     check(ChessBoard.initial.legalMoves.map(\.uci).contains(reply.bestMove ?? ""), "Stockfish move legal")
     check(reply.wdl?.count == 3, "Stockfish WDL estimate")
+    let analysis = try EngineRunner.search(path: path, moves: [], elo: nil, milliseconds: 200)
+    check(ChessBoard.initial.legalMoves.map(\.uci).contains(analysis.bestMove ?? ""), "full-strength analysis move legal")
 }

@@ -221,7 +221,7 @@ private struct PlayView: View {
                 Spacer()
                 Text(model.game?.result ?? "Live").font(.system(size: 11, weight: .semibold)).foregroundStyle(Theme.accent)
             }
-            Text(model.game?.result == nil ? (model.isAtEnd ? (model.isThinking ? "Stockfish is choosing a move…" : "Your move. Take your time.") : "Reviewing an earlier position") : "Review your game and learn from it.")
+            Text(model.postMoveReview != nil ? "Review your last move, then continue the game." : model.game?.result == nil ? (model.isAtEnd ? (model.isThinking ? "Stockfish is choosing a move…" : "Your move. Take your time.") : "Reviewing an earlier position") : "Review your game and learn from it.")
                 .font(.system(size: 15, weight: .medium))
             if !model.hasEngine {
                 Text("Stockfish is not configured. Set its executable path in Settings.")
@@ -269,39 +269,64 @@ private struct PlayView: View {
                 Spacer()
                 if model.isAnalyzing { ProgressView().controlSize(.small) }
             }
-            Toggle("Live help", isOn: Binding(get: { model.game?.liveHelp == true }, set: { _ in model.toggleAssistance() }))
-                .toggleStyle(.switch).font(.system(size: 13))
+            if model.game?.result == nil {
+                Toggle("Live help", isOn: Binding(get: { model.game?.liveHelp == true }, set: { _ in model.toggleAssistance() }))
+                    .toggleStyle(.switch).font(.system(size: 13))
+            }
             if model.game?.assisted == true {
                 Text("Assisted games do not change your local rating.").font(.system(size: 11)).foregroundStyle(Theme.muted)
             }
-            HStack(alignment: .firstTextBaseline) {
-                Text(model.analysis?.scoreText ?? "—").font(.system(size: 27, weight: .semibold, design: .rounded)).foregroundStyle(Theme.accent)
-                Spacer()
-                Text("Depth \(model.analysis?.depth ?? 0)").font(.system(size: 11)).foregroundStyle(Theme.muted)
-            }
-            HStack {
-                Text("Best move").foregroundStyle(Theme.muted)
-                Spacer()
-                Text(model.analysis?.bestMove ?? "—").font(.system(size: 13, design: .monospaced))
-            }.font(.system(size: 12))
-            if let wdl = model.analysis?.wdl, wdl.count == 3 {
-                HStack {
-                    Text("W / D / L").foregroundStyle(Theme.muted)
-                    Spacer()
-                    Text("\(wdl[0] / 10)% / \(wdl[1] / 10)% / \(wdl[2] / 10)%")
-                        .font(.system(size: 12, design: .monospaced))
+            if !model.canAnalyzePosition {
+                Text("Hints are off during this game. You can analyze it after it ends.")
+                    .font(.system(size: 12)).foregroundStyle(Theme.muted)
+            } else {
+                if let review = model.postMoveReview {
+                    Text(review.matched ? "You found Stockfish’s preferred move: \(review.played)." : "You played \(review.played). Stockfish preferred \(review.best).")
+                        .font(.system(size: 12, weight: .medium))
+                    Text("The arrow shows the position before your move.")
+                        .font(.system(size: 11)).foregroundStyle(Theme.muted)
+                    Button("Continue game") { model.go(to: model.game?.moves.count ?? 0) }
+                        .buttonStyle(SubtleButton())
+                } else if model.game?.liveHelp == true && model.analysis == nil {
+                    Text(model.isThinking ? "Comparing your move with full-strength Stockfish…" : "Move first to see what Stockfish preferred, or request a hint now.")
+                        .font(.system(size: 12)).foregroundStyle(Theme.muted)
                 }
-                .font(.system(size: 12))
-                Text("For the side to move · engine estimate").font(.system(size: 10)).foregroundStyle(Theme.muted)
-            }
-            Button("Analyze this position") { model.requestAnalysis() }
-                .buttonStyle(SubtleButton())
-                .disabled(model.isAnalyzing)
-            if let previous = model.game?.moves.prefix(model.cursor).last(where: { $0.insight != nil }), let info = previous.insight {
-                Divider().overlay(Theme.border)
-                Text("LAST MOVE REVIEW").font(.system(size: 10, weight: .bold)).tracking(1.4).foregroundStyle(Theme.muted)
-                Text("\(previous.san) · engine preferred \(info.bestMove ?? "—")")
-                    .font(.system(size: 12))
+                if let analysis = model.analysis {
+                    HStack(alignment: .firstTextBaseline) {
+                        Text(analysis.scoreText).font(.system(size: 27, weight: .semibold, design: .rounded)).foregroundStyle(Theme.accent)
+                        Spacer()
+                        Text("Depth \(analysis.depth)").font(.system(size: 11)).foregroundStyle(Theme.muted)
+                    }
+                    HStack {
+                        Text(model.postMoveReview?.matched == false ? "Better move" : "Best move").foregroundStyle(Theme.muted)
+                        Spacer()
+                        Text(analysis.bestMove ?? "—").font(.system(size: 13, design: .monospaced))
+                    }.font(.system(size: 12))
+                    if let wdl = analysis.wdl, wdl.count == 3 {
+                        HStack {
+                            Text("W / D / L").foregroundStyle(Theme.muted)
+                            Spacer()
+                            Text("\(wdl[0] / 10)% / \(wdl[1] / 10)% / \(wdl[2] / 10)%")
+                                .font(.system(size: 12, design: .monospaced))
+                        }
+                        .font(.system(size: 12))
+                        Text("For the side to move · engine estimate").font(.system(size: 10)).foregroundStyle(Theme.muted)
+                    }
+                }
+                if model.canRequestHint {
+                    Button("Show hint") { model.requestAnalysis() }
+                        .buttonStyle(SubtleButton())
+                } else if model.game?.result != nil || (!model.isAtEnd && model.postMoveReview == nil) {
+                    Button("Analyze this position") { model.requestAnalysis() }
+                        .buttonStyle(SubtleButton())
+                        .disabled(model.isAnalyzing)
+                }
+                if let previous = model.game?.moves.prefix(model.cursor).last(where: { $0.insight != nil }), let info = previous.insight, model.postMoveReview == nil {
+                    Divider().overlay(Theme.border)
+                    Text("MOVE REVIEW").font(.system(size: 10, weight: .bold)).tracking(1.4).foregroundStyle(Theme.muted)
+                    Text("\(previous.san) · engine preferred \(info.bestMove ?? "—")")
+                        .font(.system(size: 12))
+                }
             }
         }
         .cardStyle()
@@ -319,7 +344,7 @@ private struct PlayView: View {
             ForEach(["Explain the best move", "Why was my last move weak?", "Analyze this board", "Review my earlier mistakes"], id: \.self) { question in
                 Button(question) { model.askCoach(question) }
                     .buttonStyle(SubtleButton())
-                    .disabled(!model.data.coachEnabled || model.isAsking)
+                    .disabled(!model.canUseCoach || model.isAsking)
             }
             HStack {
                 TextField("Ask your own question…", text: $model.coachQuestion)
@@ -327,7 +352,7 @@ private struct PlayView: View {
                     .onSubmit { model.askCoach() }
                 Button { model.askCoach() } label: { Image(systemName: "arrow.up") }
                     .buttonStyle(.plain).foregroundStyle(Theme.accent)
-                    .disabled(!model.data.coachEnabled || model.isAsking)
+                    .disabled(!model.canUseCoach || model.isAsking)
             }
             .padding(10)
             .background(Theme.background, in: RoundedRectangle(cornerRadius: 9))
@@ -339,6 +364,8 @@ private struct PlayView: View {
             }
             if !model.data.coachEnabled {
                 Text("Enable the coach in Settings.").font(.system(size: 11)).foregroundStyle(Theme.muted)
+            } else if !model.canUseCoach {
+                Text("Coach opens with live help or after the game.").font(.system(size: 11)).foregroundStyle(Theme.muted)
             }
         }
         .cardStyle()
@@ -367,7 +394,7 @@ private struct FocusPlayView: View {
                     Text("YOU").font(.system(size: 11, weight: .bold)).tracking(1.2)
                     Text("\(model.data.rating)").font(.system(size: 11)).foregroundStyle(Theme.muted)
                     Spacer()
-                    Text(model.game?.result ?? (model.board.turn == .white ? "Your move" : "Thinking…"))
+                    Text(model.postMoveReview != nil ? "Last move review" : model.game?.result ?? (model.board.turn == .white ? "Your move" : "Thinking…"))
                         .font(.system(size: 11, weight: .medium)).foregroundStyle(Theme.accent)
                 }
             }
@@ -381,7 +408,7 @@ private struct FocusPlayView: View {
                 .foregroundStyle(Theme.accent)
                 Text("MOVE \((model.cursor + 1) / 2)")
                     .font(.system(size: 10, weight: .bold)).tracking(1.5).foregroundStyle(Theme.muted)
-                Text(model.isThinking ? "Stockfish is thinking" : model.game?.result == nil ? "Find your best move" : "Game complete")
+                Text(model.postMoveReview != nil ? "Review your move" : model.isThinking ? "Stockfish is thinking" : model.game?.result == nil ? "Find your best move" : "Game complete")
                     .font(.system(size: 16, weight: .semibold, design: .rounded))
                 HStack(spacing: 12) {
                     Button { model.go(to: model.cursor - 1) } label: { Image(systemName: "chevron.left") }
@@ -414,18 +441,33 @@ private struct FocusPlayView: View {
                         }
                     }
                 }
-                if model.analysis != nil || model.game?.liveHelp == true {
+                if let review = model.postMoveReview {
+                    Divider().overlay(Theme.border)
+                    Text(review.matched ? "You found the best move." : "\(review.played) → \(review.best)")
+                        .font(.system(size: 12, weight: .medium))
+                    Button("Continue game") { model.go(to: model.game?.moves.count ?? 0) }
+                        .buttonStyle(.plain).font(.system(size: 12, weight: .semibold)).foregroundStyle(Theme.accent)
+                }
+                if let analysis = model.analysis {
                     Divider().overlay(Theme.border)
                     Text("BEST MOVE").font(.system(size: 10, weight: .bold)).tracking(1.5).foregroundStyle(Theme.muted)
-                    Text(model.analysis?.bestMove ?? "Analyzing…")
+                    Text(analysis.bestMove ?? "—")
                         .font(.system(size: 17, weight: .semibold, design: .monospaced)).foregroundStyle(Theme.accent)
-                    Text(model.analysis?.scoreText ?? "—").font(.system(size: 12)).foregroundStyle(Theme.muted)
-                } else {
-                    Button { model.requestAnalysis() } label: { Label("Show best move", systemImage: "arrow.up.right") }
+                    Text(analysis.scoreText).font(.system(size: 12)).foregroundStyle(Theme.muted)
+                } else if model.canRequestHint {
+                    Button { model.requestAnalysis() } label: { Label("Show hint", systemImage: "arrow.up.right") }
                         .buttonStyle(.plain)
                         .font(.system(size: 11, weight: .medium))
                         .foregroundStyle(Theme.accent)
                         .disabled(model.isAnalyzing)
+                } else if model.game?.result != nil {
+                    Button("Analyze position") { model.requestAnalysis() }
+                        .buttonStyle(.plain).font(.system(size: 11, weight: .medium)).foregroundStyle(Theme.accent)
+                } else if model.game?.liveHelp == true {
+                    Text(model.isThinking ? "Analyzing your move…" : "Move first to see the better line.")
+                        .font(.system(size: 11)).foregroundStyle(Theme.muted)
+                } else {
+                    Text("Hints are off.").font(.system(size: 11)).foregroundStyle(Theme.muted)
                 }
                 if !model.hasEngine {
                     Text("Set Stockfish path in Settings.").font(.system(size: 11)).foregroundStyle(.orange)
