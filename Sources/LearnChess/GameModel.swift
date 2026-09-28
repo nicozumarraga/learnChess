@@ -7,6 +7,25 @@ struct MoveInsight: Codable, Sendable {
     var afterScore: Int?
     var beforeWDL: [Int]?
     var afterWDL: [Int]?
+    var quality: MoveQuality? = nil
+}
+
+enum MoveQuality: String, Codable, Sendable {
+    case brilliant, great, best, good, inaccuracy, mistake, blunder
+
+    var title: String { rawValue.capitalized }
+
+    static func judge(played: String, best: String?, loss: Int, wasSacrifice: Bool, wasUnderPressure: Bool) -> Self {
+        if loss >= 300 { return .blunder }
+        if loss >= 150 { return .mistake }
+        if loss >= 65 { return .inaccuracy }
+        if played == best {
+            if wasSacrifice && loss <= 20 { return .brilliant }
+            if wasUnderPressure && loss <= 20 { return .great }
+            return .best
+        }
+        return .good
+    }
 }
 
 struct PostMoveReview: Sendable {
@@ -34,6 +53,9 @@ struct SavedGame: Codable, Identifiable, Sendable {
     var moves: [SavedMove] = []
     var result: String? = nil
     var ratingApplied = false
+    var ratingChange: Int? = nil
+    var analysisComplete = false
+    var postGameSummary: String? = nil
     var title: String { "Stockfish · \(opponentElo)" }
 
     init(opponentElo: Int, assisted: Bool) {
@@ -42,7 +64,7 @@ struct SavedGame: Codable, Identifiable, Sendable {
     }
 
     private enum CodingKeys: String, CodingKey {
-        case id, startedAt, updatedAt, opponentElo, assisted, liveHelp, moves, result, ratingApplied
+        case id, startedAt, updatedAt, opponentElo, assisted, liveHelp, moves, result, ratingApplied, ratingChange, analysisComplete, postGameSummary
     }
 
     init(from decoder: Decoder) throws {
@@ -56,6 +78,9 @@ struct SavedGame: Codable, Identifiable, Sendable {
         moves = try values.decodeIfPresent([SavedMove].self, forKey: .moves) ?? []
         result = try values.decodeIfPresent(String.self, forKey: .result)
         ratingApplied = try values.decodeIfPresent(Bool.self, forKey: .ratingApplied) ?? false
+        ratingChange = try values.decodeIfPresent(Int.self, forKey: .ratingChange)
+        analysisComplete = try values.decodeIfPresent(Bool.self, forKey: .analysisComplete) ?? false
+        postGameSummary = try values.decodeIfPresent(String.self, forKey: .postGameSummary)
     }
 }
 
@@ -66,6 +91,24 @@ struct LocalData: Codable {
     var codexPath = CodexCoach.detectedPath()
     var coachEnabled = false
     var games: [SavedGame] = []
+    var ratingPolicyVersion = 1
+
+    init() {}
+
+    private enum CodingKeys: String, CodingKey {
+        case rating, opponentElo, enginePath, codexPath, coachEnabled, games, ratingPolicyVersion
+    }
+
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        rating = try values.decodeIfPresent(Int.self, forKey: .rating) ?? 1200
+        opponentElo = try values.decodeIfPresent(Int.self, forKey: .opponentElo) ?? 1400
+        enginePath = try values.decodeIfPresent(String.self, forKey: .enginePath) ?? EngineRunner.detectedPath()
+        codexPath = try values.decodeIfPresent(String.self, forKey: .codexPath) ?? CodexCoach.detectedPath()
+        coachEnabled = try values.decodeIfPresent(Bool.self, forKey: .coachEnabled) ?? false
+        games = try values.decodeIfPresent([SavedGame].self, forKey: .games) ?? []
+        ratingPolicyVersion = try values.decodeIfPresent(Int.self, forKey: .ratingPolicyVersion) ?? 0
+    }
 }
 
 enum GameStorage {
@@ -101,16 +144,22 @@ enum GameStorage {
     @Published var isThinking = false
     @Published var isAnalyzing = false
     @Published var isAsking = false
+    @Published var analyzingGameID: UUID?
+    @Published var analysisProgress = ""
+    @Published var replayMove: ChessMove?
+    @Published var replayCaption = ""
     @Published var message: String?
     @Published var panel: Panel = .play
     @Published var isFocusMode = false
     @Published var sidebarCollapsed = false
     private let autosave: Bool
+    private var replayToken = UUID()
     enum Panel: String, CaseIterable { case play = "Play", library = "Library", settings = "Settings" }
 
     init(data: LocalData? = nil, autosave: Bool = true) {
         self.data = data ?? GameStorage.load()
         self.autosave = autosave
+        reconcileRatingPolicy()
         if let game = self.data.games.max(by: { $0.updatedAt < $1.updatedAt }) { open(game.id) }
         else { newGame() }
     }
@@ -123,6 +172,28 @@ enum GameStorage {
     var canAnalyzePosition: Bool { game?.liveHelp == true || game?.result != nil }
     var canUseCoach: Bool { data.coachEnabled && canAnalyzePosition }
     var hasEngine: Bool { FileManager.default.isExecutableFile(atPath: data.enginePath) }
+    var isPostGameAnalyzing: Bool { analyzingGameID == activeID }
+
+    private func reconcileRatingPolicy() {
+        guard data.ratingPolicyVersion < 1 else { return }
+        for index in data.games.indices.sorted(by: { data.games[$0].startedAt < data.games[$1].startedAt }) {
+            let game = data.games[index]
+            let usedLiveHelp = game.liveHelp || game.moves.contains(where: { $0.insight != nil })
+            if game.assisted, usedLiveHelp, game.ratingApplied, let result = game.result {
+                let previous = data.rating
+                data.rating = updatedRating(after: result, against: game.opponentElo)
+                data.games[index].ratingChange = data.rating - previous
+            }
+        }
+        data.ratingPolicyVersion = 1
+        persist()
+    }
+
+    private func updatedRating(after result: String, against elo: Int) -> Int {
+        let score = result == "1-0" ? 1.0 : result == "0-1" ? 0.0 : 0.5
+        let expected = 1 / (1 + pow(10.0, Double(elo - data.rating) / 400))
+        return max(100, data.rating + Int((32 * (score - expected)).rounded()))
+    }
     var legalTargets: Set<Int> {
         guard let selectedSquare else { return [] }
         return Set(board.legalMoves.filter { $0.from == selectedSquare }.map(\.to))
@@ -163,9 +234,13 @@ enum GameStorage {
         isThinking = false
         promotionChoices = []
         if data.games[index].result == nil && board.turn == .black { resumeEngineTurn() }
+        if data.games[index].result != nil { startPostGameAnalysisIfNeeded() }
     }
 
     func go(to ply: Int) {
+        replayToken = UUID()
+        replayMove = nil
+        replayCaption = ""
         cursor = max(0, min(ply, game?.moves.count ?? 0))
         reconstructBoard()
         analysis = nil
@@ -213,15 +288,15 @@ enum GameStorage {
             applyRatingIfNeeded(at: index)
         }
         persist()
+        if data.games[index].result != nil { startPostGameAnalysisIfNeeded() }
     }
 
     private func applyRatingIfNeeded(at index: Int) {
         guard let result = data.games[index].result, !data.games[index].ratingApplied else { return }
         data.games[index].ratingApplied = true
-        guard !data.games[index].assisted else { return }
-        let score = result == "1-0" ? 1.0 : result == "0-1" ? 0.0 : 0.5
-        let expected = 1 / (1 + pow(10.0, Double(data.games[index].opponentElo - data.rating) / 400))
-        data.rating = max(100, data.rating + Int((32 * (score - expected)).rounded()))
+        let previous = data.rating
+        data.rating = updatedRating(after: result, against: data.games[index].opponentElo)
+        data.games[index].ratingChange = data.rating - previous
     }
 
     private func makeHumanMove(_ move: ChessMove) {
@@ -352,14 +427,139 @@ enum GameStorage {
         }
     }
 
+    func replay(_ ply: Int) {
+        guard let game, game.moves.indices.contains(ply - 1),
+              let move = ChessBoard.move(game.moves[ply - 1].uci) else { return }
+        go(to: ply - 1)
+        let token = replayToken
+        let caption = "\((ply + 1) / 2)\(ply.isMultiple(of: 2) ? "..." : ".")\(game.moves[ply - 1].san)"
+        replayCaption = "Before \(caption)"
+        Task {
+            try? await Task.sleep(for: .milliseconds(650))
+            guard replayToken == token else { return }
+            go(to: ply)
+            replayToken = token
+            replayMove = move
+            replayCaption = "After \(caption)"
+            try? await Task.sleep(for: .seconds(2))
+            if replayToken == token { replayMove = nil; replayCaption = "" }
+        }
+    }
+
+    func startPostGameAnalysisIfNeeded() {
+        guard let game, game.result != nil, analyzingGameID == nil else { return }
+        let needsEngine = !game.analysisComplete
+        let needsCoach = data.coachEnabled && game.postGameSummary == nil &&
+            FileManager.default.isExecutableFile(atPath: data.codexPath)
+        guard needsEngine || needsCoach else { return }
+        let id = game.id
+        let moves = game.moves
+        let result = game.result ?? "1/2-1/2"
+        let enginePath = data.enginePath
+        let codexPath = data.codexPath
+        analyzingGameID = id
+        analysisProgress = needsEngine ? "Analyzing moves with Stockfish…" : "Writing game review with Codex…"
+        Task {
+            do {
+                if needsEngine {
+                    guard FileManager.default.isExecutableFile(atPath: enginePath) else { throw EngineError.unavailable }
+                    var board = ChessBoard.initial
+                    var prefix: [String] = []
+                    var before = try await Task.detached {
+                        try EngineRunner.search(path: enginePath, moves: [], elo: nil, milliseconds: 500)
+                    }.value
+                    var insights: [MoveInsight] = []
+                    for (offset, saved) in moves.enumerated() {
+                        guard let move = ChessBoard.move(saved.uci) else { throw EngineError.noMove }
+                        let piece = board.squares[move.from]
+                        let best = before.bestMove
+                        guard board.apply(move) else { throw EngineError.noMove }
+                        let sacrifice = best == saved.uci &&
+                            [Kind.knight, .bishop, .rook, .queen].contains(piece?.kind ?? .pawn) &&
+                            board.legalMoves.contains(where: { $0.to == move.to })
+                        prefix.append(saved.uci)
+                        let after: EngineReply
+                        if offset == moves.count - 1 {
+                            let whiteScore = result == "1-0" ? 10_000 : result == "0-1" ? -10_000 : 0
+                            after = EngineReply(bestMove: nil,
+                                                scoreCentipawns: board.turn == .white ? whiteScore : -whiteScore,
+                                                wdl: board.turn == .white ? terminalWDL(result) : Array(terminalWDL(result).reversed()))
+                        } else {
+                            let current = prefix
+                            after = try await Task.detached {
+                                try EngineRunner.search(path: enginePath, moves: current, elo: nil, milliseconds: 500)
+                            }.value
+                        }
+                        let beforeCP = effectiveScore(before)
+                        let afterCP = effectiveScore(after)
+                        let loss = max(0, (beforeCP ?? 0) + (afterCP ?? 0))
+                        let moverIsWhite = offset.isMultiple(of: 2)
+                        let quality = MoveQuality.judge(played: saved.uci, best: best, loss: loss,
+                                                        wasSacrifice: sacrifice,
+                                                        wasUnderPressure: (beforeCP ?? 0) < -100)
+                        insights.append(MoveInsight(bestMove: best,
+                                                    beforeScore: beforeCP.map { moverIsWhite ? $0 : -$0 },
+                                                    afterScore: afterCP.map { moverIsWhite ? -$0 : $0 },
+                                                    beforeWDL: before.wdl.map { moverIsWhite ? $0 : [$0[2], $0[1], $0[0]] },
+                                                    afterWDL: after.wdl.map { moverIsWhite ? [$0[2], $0[1], $0[0]] : $0 },
+                                                    quality: quality))
+                        before = after
+                        analysisProgress = "Analyzing move \(offset + 1) of \(moves.count)…"
+                    }
+                    if let index = data.games.firstIndex(where: { $0.id == id }) {
+                        for offset in insights.indices where data.games[index].moves.indices.contains(offset) {
+                            data.games[index].moves[offset].insight = insights[offset]
+                        }
+                        data.games[index].analysisComplete = true
+                        persist()
+                    }
+                }
+                if needsCoach, let index = data.games.firstIndex(where: { $0.id == id }) {
+                    analysisProgress = "Writing game review with Codex…"
+                    let finished = data.games[index]
+                    let history = finished.moves.enumerated().map { offset, move in
+                        let prefix = "\(offset / 2 + 1)\(offset.isMultiple(of: 2) ? "." : "...")"
+                        return "\(prefix)\(move.san) [\(move.uci)] — \(move.insight?.quality?.title ?? "unrated"), before=\(move.insight?.beforeScore.map(String.init) ?? "?"), after=\(move.insight?.afterScore.map(String.init) ?? "?") cp from White's perspective"
+                    }.joined(separator: "\n")
+                    let prompt = """
+                    Review this completed chess game for the White player. Result: \(result). Give a concise game summary, the main turning points, and 2-4 specific lessons. Cite actual moves using exact notation such as 16...Rg8 or 17.Bxh6 so the app can link them to the board. Use only the supplied moves and engine comparisons. The move labels are approximate Stockfish-based heuristics; do not claim certainty about brilliant or great moves. Do not invent variations, scores, or moves.
+
+                    \(history)
+                    """
+                    let answer = try await Task.detached {
+                        try CodexCoach.ask(path: codexPath, prompt: prompt, workingDirectory: GameStorage.directory)
+                    }.value
+                    if let index = data.games.firstIndex(where: { $0.id == id }) {
+                        data.games[index].postGameSummary = answer
+                        persist()
+                    }
+                }
+            } catch { message = "Postgame analysis: \(error.localizedDescription)" }
+            analyzingGameID = nil
+            analysisProgress = ""
+        }
+    }
+
+    private func terminalWDL(_ result: String) -> [Int] {
+        result == "1-0" ? [1000, 0, 0] : result == "0-1" ? [0, 0, 1000] : [0, 1000, 0]
+    }
+
+    private func effectiveScore(_ reply: EngineReply) -> Int? {
+        if let score = reply.scoreCentipawns { return score }
+        if let mate = reply.mate { return mate > 0 ? 10_000 - abs(mate) * 100 : -10_000 + abs(mate) * 100 }
+        return nil
+    }
+
     func askCoach(_ shortcut: String? = nil) {
         guard canUseCoach else { message = "Enable live help to use the coach during a game, or finish the game first."; return }
         guard !isAsking else { return }
         let question = shortcut ?? coachQuestion.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !question.isEmpty else { return }
         guard let game else { return }
-        if let index = activeIndex { data.games[index].assisted = true; persist() }
-        let history = game.moves.prefix(cursor).enumerated().map { "\($0.offset + 1). \($0.element.san) [\($0.element.uci)]" }.joined(separator: "\n")
+        if game.result == nil, let index = activeIndex { data.games[index].assisted = true; persist() }
+        let history = game.moves.prefix(cursor).enumerated().map {
+            "\($0.offset / 2 + 1)\($0.offset.isMultiple(of: 2) ? "." : "...")\($0.element.san) [\($0.element.uci)]"
+        }.joined(separator: "\n")
         let inspectedCount = postMoveReview == nil ? cursor : min(cursor + 1, game.moves.count)
         let insights = game.moves.prefix(inspectedCount).compactMap { move -> String? in
             guard let info = move.insight else { return nil }

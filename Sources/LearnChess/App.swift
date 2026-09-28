@@ -13,6 +13,31 @@ private enum Theme {
     static let darkSquare = Color(red: 0.46, green: 0.60, blue: 0.33)
 }
 
+private extension MoveQuality {
+    var symbol: String {
+        switch self {
+        case .brilliant: "sparkles"
+        case .great: "star.fill"
+        case .best: "checkmark.circle.fill"
+        case .good: "checkmark.circle"
+        case .inaccuracy: "questionmark.circle.fill"
+        case .mistake: "exclamationmark.circle.fill"
+        case .blunder: "xmark.octagon.fill"
+        }
+    }
+
+    var color: Color {
+        switch self {
+        case .brilliant: .cyan
+        case .great: .purple
+        case .best, .good: Theme.accent
+        case .inaccuracy: .yellow
+        case .mistake: .orange
+        case .blunder: .red
+        }
+    }
+}
+
 @main struct LearnChessApp: App {
     @StateObject private var model = GameModel()
     var body: some Scene {
@@ -91,7 +116,7 @@ private struct RootView: View {
                 VStack(alignment: .leading, spacing: 10) {
                     Text("YOUR RATING").font(.system(size: 10, weight: .bold)).tracking(1.8).foregroundStyle(Theme.muted)
                     Text("\(model.data.rating)").font(.system(size: 36, weight: .semibold, design: .rounded))
-                    Text("Local · unassisted games").font(.system(size: 11)).foregroundStyle(Theme.muted)
+                    Text("Local · completed games").font(.system(size: 11)).foregroundStyle(Theme.muted)
                 }
                 .padding(18)
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -141,6 +166,7 @@ private struct RootView: View {
 
 private struct PlayView: View {
     @EnvironmentObject var model: GameModel
+    @State private var expandedCategories: Set<MoveQuality> = [.blunder, .mistake]
     var body: some View {
         Group {
             if model.isFocusMode { FocusPlayView() }
@@ -162,10 +188,14 @@ private struct PlayView: View {
                 Button { model.newGame() } label: { Label("New game", systemImage: "plus") }
                     .buttonStyle(AccentButton())
             }
-            HStack(alignment: .top, spacing: 24) {
+            GeometryReader { space in
+              HStack(alignment: .top, spacing: 24) {
                 VStack(spacing: 12) {
                     playerStrip(name: "Stockfish", detail: "\(model.game?.opponentElo ?? model.data.opponentElo) Elo", symbol: "cpu", active: model.board.turn == .black)
                     ChessBoardView()
+                    if !model.replayCaption.isEmpty {
+                        Text(model.replayCaption).font(.system(size: 12, weight: .semibold)).foregroundStyle(Theme.accent)
+                    }
                     playerStrip(name: "You", detail: "\(model.data.rating) local Elo", symbol: "person.fill", active: model.board.turn == .white)
                     HStack(spacing: 10) {
                         Button { model.go(to: 0) } label: { Image(systemName: "backward.end.fill") }
@@ -180,16 +210,22 @@ private struct PlayView: View {
                     .padding(.top, 4)
                 }
                 .frame(maxWidth: .infinity)
-                ScrollView {
-                    VStack(alignment: .leading, spacing: 16) {
-                        statusCard
-                        movesCard
-                        analysisCard
-                        coachCard
+                ScrollViewReader { scroll in
+                    ScrollView {
+                        VStack(alignment: .leading, spacing: 16) {
+                            statusCard
+                            movesCard.id("moves")
+                            analysisCard
+                            if model.game?.result != nil { postGameCard }
+                            coachCard(scrollToMoves: { withAnimation { scroll.scrollTo("moves", anchor: .top) } })
+                        }
+                        .padding(.bottom, 24)
                     }
-                    .padding(.bottom, 24)
+                    .frame(width: 340)
+                    .frame(height: space.size.height)
                 }
-                .frame(width: 340)
+            }
+              .frame(height: space.size.height)
             }
         }
         .padding(28)
@@ -223,6 +259,10 @@ private struct PlayView: View {
             }
             Text(model.game?.result == nil ? (model.isAtEnd ? (model.isThinking ? "Stockfish is choosing a move…" : model.postMoveReview != nil ? "Your move. Last-move review is ready." : "Your move. Take your time.") : "Reviewing an earlier position") : "Review your game and learn from it.")
                 .font(.system(size: 15, weight: .medium))
+            if let change = model.game?.ratingChange {
+                Text("Local rating \(String(format: "%+d", change)) · now \(model.data.rating)")
+                    .font(.system(size: 12, weight: .semibold)).foregroundStyle(Theme.accent)
+            }
             if !model.hasEngine {
                 Text("Stockfish is not configured. Set its executable path in Settings.")
                     .font(.system(size: 12)).foregroundStyle(.orange)
@@ -255,7 +295,13 @@ private struct PlayView: View {
 
     private func moveCell(_ move: SavedMove, ply: Int) -> some View {
         Button { model.go(to: ply) } label: {
-            Text(move.san).foregroundStyle(model.cursor == ply ? Theme.accent : Theme.text)
+            HStack(spacing: 4) {
+                Text(move.san).foregroundStyle(model.cursor == ply ? Theme.accent : Theme.text)
+                if let quality = move.insight?.quality {
+                    Image(systemName: quality.symbol).foregroundStyle(quality.color)
+                        .help("\(quality.title) · approximate engine label")
+                }
+            }
                 .padding(.horizontal, 6).padding(.vertical, 3)
                 .background(model.cursor == ply ? Theme.accent.opacity(0.14) : .clear, in: RoundedRectangle(cornerRadius: 5))
         }
@@ -274,7 +320,13 @@ private struct PlayView: View {
                     .toggleStyle(.switch).font(.system(size: 13))
             }
             if model.game?.assisted == true {
-                Text("Assisted games do not change your local rating.").font(.system(size: 11)).foregroundStyle(Theme.muted)
+                Text("Live help was used in this game. Completed games count toward your local rating.").font(.system(size: 11)).foregroundStyle(Theme.muted)
+            }
+            if model.isPostGameAnalyzing {
+                ProgressView(model.analysisProgress).font(.system(size: 11))
+            } else if model.game?.analysisComplete == true {
+                Text("Move labels are approximate full-strength engine estimates.")
+                    .font(.system(size: 11)).foregroundStyle(Theme.muted)
             }
             if !model.canAnalyzePosition {
                 Text("Hints are off during this game. You can analyze it after it ends.")
@@ -336,12 +388,63 @@ private struct PlayView: View {
         .cardStyle()
     }
 
-    private var coachCard: some View {
+    private var postGameCard: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            sectionTitle("POSTGAME MOVE REVIEW")
+            if model.isPostGameAnalyzing && model.game?.analysisComplete != true {
+                ProgressView(model.analysisProgress).font(.system(size: 11))
+            } else if model.game?.analysisComplete == true, let moves = model.game?.moves {
+                ForEach([MoveQuality.blunder, .mistake, .inaccuracy, .good, .best, .great, .brilliant], id: \.self) { quality in
+                    let entries = moves.enumerated().filter { $0.element.insight?.quality == quality }
+                    DisclosureGroup(isExpanded: Binding(
+                        get: { expandedCategories.contains(quality) },
+                        set: { if $0 { expandedCategories.insert(quality) } else { expandedCategories.remove(quality) } }
+                    )) {
+                        if entries.isEmpty {
+                            Text("None").font(.system(size: 11)).foregroundStyle(Theme.muted)
+                        } else {
+                            ForEach(entries, id: \.element.id) { entry in
+                                Button { model.replay(entry.offset + 1) } label: {
+                                    Text("\(entry.offset / 2 + 1)\(entry.offset.isMultiple(of: 2) ? "." : "...")\(entry.element.san)")
+                                        .font(.system(size: 12, design: .monospaced))
+                                }
+                                .buttonStyle(.plain).foregroundStyle(Theme.accent)
+                            }
+                        }
+                    } label: {
+                        HStack(spacing: 7) {
+                            Image(systemName: quality.symbol).foregroundStyle(quality.color)
+                            Text(quality.title).font(.system(size: 12, weight: .medium))
+                            Spacer()
+                            Text("\(entries.count)").font(.system(size: 11)).foregroundStyle(Theme.muted)
+                        }
+                    }
+                }
+                Text("Labels are approximate Stockfish estimates.").font(.system(size: 10)).foregroundStyle(Theme.muted)
+            } else {
+                Text("Engine review will start when Stockfish is available.")
+                    .font(.system(size: 11)).foregroundStyle(Theme.muted)
+            }
+        }
+        .cardStyle()
+    }
+
+    private func coachCard(scrollToMoves: @escaping () -> Void) -> some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack {
                 sectionTitle("CODEX COACH")
                 Spacer()
                 Image(systemName: "sparkles").foregroundStyle(Theme.accent)
+            }
+            if model.game?.postGameSummary != nil || !model.coachAnswer.isEmpty {
+                Button("Back to moves ↑", action: scrollToMoves)
+                    .buttonStyle(.plain).font(.system(size: 11, weight: .semibold)).foregroundStyle(Theme.accent)
+            }
+            if let summary = model.game?.postGameSummary {
+                Text("POSTGAME REVIEW").font(.system(size: 10, weight: .bold)).tracking(1.4).foregroundStyle(Theme.muted)
+                linkedAnswer(summary)
+            } else if model.isPostGameAnalyzing && model.game?.result != nil {
+                ProgressView(model.analysisProgress).font(.system(size: 11))
             }
             Text("Ask about the position, a move, or your plan.")
                 .font(.system(size: 12)).foregroundStyle(Theme.muted)
@@ -362,9 +465,7 @@ private struct PlayView: View {
             .background(Theme.background, in: RoundedRectangle(cornerRadius: 9))
             if model.isAsking { ProgressView("Thinking with Codex…").font(.system(size: 12)) }
             if !model.coachAnswer.isEmpty {
-                Text(model.coachAnswer).font(.system(size: 12)).lineSpacing(4).textSelection(.enabled)
-                    .padding(12).frame(maxWidth: .infinity, alignment: .leading)
-                    .background(Theme.accent.opacity(0.1), in: RoundedRectangle(cornerRadius: 9))
+                linkedAnswer(model.coachAnswer)
             }
             if !model.data.coachEnabled {
                 Text("Enable the coach in Settings.").font(.system(size: 11)).foregroundStyle(Theme.muted)
@@ -377,6 +478,19 @@ private struct PlayView: View {
 
     private func sectionTitle(_ title: String) -> some View {
         Text(title).font(.system(size: 10, weight: .bold)).tracking(1.6).foregroundStyle(Theme.muted)
+    }
+
+    private func linkedAnswer(_ answer: String) -> some View {
+        Text(MoveLinks.attributed(answer, moves: model.game?.moves ?? []))
+            .font(.system(size: 12)).lineSpacing(4).textSelection(.enabled)
+            .tint(Theme.accent)
+            .environment(\.openURL, OpenURLAction { url in
+                guard let ply = MoveLinks.ply(from: url) else { return .systemAction }
+                model.replay(ply)
+                return .handled
+            })
+            .padding(12).frame(maxWidth: .infinity, alignment: .leading)
+            .background(Theme.accent.opacity(0.1), in: RoundedRectangle(cornerRadius: 9))
     }
 }
 
@@ -394,6 +508,9 @@ private struct FocusPlayView: View {
                 }
                 ChessBoardView()
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
+                if !model.replayCaption.isEmpty {
+                    Text(model.replayCaption).font(.system(size: 11, weight: .semibold)).foregroundStyle(Theme.accent)
+                }
                 HStack {
                     Text("YOU").font(.system(size: 11, weight: .bold)).tracking(1.2)
                     Text("\(model.data.rating)").font(.system(size: 11)).foregroundStyle(Theme.muted)
@@ -436,6 +553,10 @@ private struct FocusPlayView: View {
                                         Text("\((index / 2) + 1)\(index.isMultiple(of: 2) ? "." : "…")")
                                             .foregroundStyle(Theme.muted)
                                         Text(move.san).foregroundStyle(model.cursor == index + 1 ? Theme.accent : Theme.text)
+                                        if let quality = move.insight?.quality {
+                                            Image(systemName: quality.symbol).foregroundStyle(quality.color)
+                                                .help("\(quality.title) · approximate engine label")
+                                        }
                                         Spacer()
                                     }
                                     .font(.system(size: 12, design: .monospaced))
@@ -541,7 +662,7 @@ private struct ChessBoardView: View {
             .overlay(RoundedRectangle(cornerRadius: 12).stroke(Theme.border, lineWidth: 1))
             .frame(width: size, height: size)
             .overlay {
-                if let move = previewBoard == nil ? ChessBoard.move(model.analysis?.bestMove ?? "") : previewMove,
+                if let move = previewBoard == nil ? (model.replayMove ?? ChessBoard.move(model.analysis?.bestMove ?? "")) : previewMove,
                    displayedBoard.legalMoves.contains(move) {
                     BestMoveArrow(move: move, isKnight: displayedBoard.squares[move.from]?.kind == .knight, size: size)
                         .allowsHitTesting(false)
@@ -666,9 +787,13 @@ private struct SettingsView: View {
                 .cardStyle()
                 VStack(alignment: .leading, spacing: 16) {
                     sectionTitle("CODEX COACH")
-                    Toggle("Enable Codex coach", isOn: Binding(get: { model.data.coachEnabled }, set: { model.data.coachEnabled = $0; model.persist() }))
+                    Toggle("Enable Codex coach", isOn: Binding(get: { model.data.coachEnabled }, set: {
+                        model.data.coachEnabled = $0
+                        model.persist()
+                        if $0 { model.startPostGameAnalysisIfNeeded() }
+                    }))
                         .toggleStyle(.switch).font(.system(size: 14))
-                    Text("Uses your local Codex CLI sign-in. Questions send the current FEN, move list, and available engine analysis to Codex.")
+                    Text("Uses your local Codex CLI sign-in. Completed games get an automatic review; questions send the current FEN, move list, and available engine analysis to Codex.")
                         .font(.system(size: 12)).foregroundStyle(Theme.muted)
                     pathRow(label: "Codex executable", value: model.data.codexPath) { chooseExecutable { model.data.codexPath = $0; model.persist() } }
                     Text(FileManager.default.isExecutableFile(atPath: model.data.codexPath) ? "Codex CLI found." : "Choose an installed Codex CLI executable.")

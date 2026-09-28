@@ -2,9 +2,72 @@ import Foundation
 
 @main struct ModelCheck {
     @MainActor static func main() async {
+        check(MoveQuality.judge(played: "e2e4", best: "e2e4", loss: 0, wasSacrifice: false, wasUnderPressure: false) == .best,
+              "best move label")
+        check(MoveQuality.judge(played: "e2e4", best: "d2d4", loss: 350, wasSacrifice: false, wasUnderPressure: false) == .blunder,
+              "blunder label")
+        var archived = LocalData()
+        archived.ratingPolicyVersion = 0
+        var oldWin = SavedGame(opponentElo: 1320, assisted: true)
+        oldWin.liveHelp = true
+        oldWin.result = "1-0"
+        oldWin.ratingApplied = true
+        oldWin.analysisComplete = true
+        archived.games = [oldWin]
+        let migrated = GameModel(data: archived, autosave: false)
+        check(migrated.data.rating == 1221 && migrated.data.ratingPolicyVersion == 1,
+              "previous assisted win updates local rating once")
+        check(migrated.game?.ratingChange == 21, "saved win displays its rating change")
+        migrated.newGame()
+        check(migrated.data.rating == 1221, "rating migration does not repeat")
+        var alreadyRated = LocalData()
+        alreadyRated.ratingPolicyVersion = 0
+        var coachedAfterGame = SavedGame(opponentElo: 1320, assisted: true)
+        coachedAfterGame.result = "1-0"
+        coachedAfterGame.ratingApplied = true
+        coachedAfterGame.analysisComplete = true
+        alreadyRated.games = [coachedAfterGame]
+        check(GameModel(data: alreadyRated, autosave: false).data.rating == 1200,
+              "postgame coaching does not double-count an old result")
+
+        var citedMoves = Array(repeating: SavedMove(uci: "a2a3", san: "a3"), count: 39)
+        citedMoves[31].san = "Rg8"
+        citedMoves[32].san = "Bxh6"
+        citedMoves[38].san = "Bg7"
+        let linked = MoveLinks.attributed("After 16...Rg8, 17.Bxh6 failed; 17.g3 was safer. Later 20.Bg7.", moves: citedMoves)
+        let targets = linked.runs.compactMap { $0.link.flatMap(MoveLinks.ply(from:)) }
+        check(targets == [32, 33, 39], "only actual saved move references become links")
+
         var initial = LocalData()
         initial.games = []
         check(!initial.enginePath.isEmpty, "Stockfish installed for live-help check")
+
+        var finished = SavedGame(opponentElo: 1320, assisted: false)
+        var position = ChessBoard.initial
+        for uci in ["f2f3", "e7e5", "g2g4", "d8h4"] {
+            let move = ChessBoard.move(uci)!
+            finished.moves.append(SavedMove(uci: uci, san: position.san(for: move)))
+            check(position.apply(move), "saved checkmate move is legal")
+        }
+        finished.result = position.outcome
+        var archive = initial
+        archive.games = [finished]
+        let mockCLI = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+            .appendingPathComponent(".build/mock-codex")
+        try! "#!/bin/sh\ncat >/dev/null\nprintf 'Review 2...Qh4#'\n".write(to: mockCLI, atomically: true, encoding: .utf8)
+        try! FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: mockCLI.path)
+        defer { try? FileManager.default.removeItem(at: mockCLI) }
+        archive.coachEnabled = true
+        archive.codexPath = mockCLI.path
+        let postGame = GameModel(data: archive, autosave: false)
+        await waitUntil { postGame.game?.postGameSummary != nil }
+        check(postGame.game?.moves.allSatisfy { $0.insight?.quality != nil } == true,
+              "completed game receives a label for every move")
+        check(postGame.game?.postGameSummary == "Review 2...Qh4#",
+              "completed game automatically receives a Codex review")
+        let reviewLinks = MoveLinks.attributed(postGame.game?.postGameSummary ?? "", moves: postGame.game?.moves ?? [])
+        check(reviewLinks.runs.compactMap { $0.link.flatMap(MoveLinks.ply(from:)) } == [4],
+              "postgame review links to the final move")
 
         let model = GameModel(data: initial, autosave: false)
         model.toggleAssistance()

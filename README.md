@@ -9,9 +9,10 @@ The app icon source is [`Assets/AppIcon.png`](Assets/AppIcon.png); `scripts/buil
 - Legal chess moves, checkmate and stalemate detection, SAN move list, board navigation, and saved games that reopen at the last move.
 - Stockfish play with a selectable 1320–3190 engine Elo setting, plus full strength analysis, best move, score, and win/draw/loss estimate.
 - Best move arrows on the board, including an L-shaped arrow for knight moves.
-- Optional live help prepares a comparison after you move. Select **Review last move** to reveal the earlier position and arrow in a small review board; the main board stays playable. **Show hint** reveals the current best move before you play. Games without live help keep hints and coaching unavailable until completion. Assisted games do not change the local rating.
-- A local rating updated after completed, unassisted games. This is a personal progress indicator, not an official Elo rating.
+- Optional live help prepares a comparison after you move. Select **Review last move** to reveal the earlier position and arrow in a small review board; the main board stays playable. **Show hint** reveals the current best move before you play. Games without live help keep hints and coaching unavailable until completion.
+- A local rating updated after every completed game, including games with live help. This is a personal progress indicator, not an official Elo rating. Previously completed assisted games are counted once when upgrading.
 - A collapsible sidebar and compact Focus view with a large board, recent moves, and a small status panel.
+- Completed games receive full-strength Stockfish move labels, including good, inaccuracy, mistake, and blunder. Brilliant and great are cautious heuristics, not official chess.com classifications. With Codex enabled, the app also writes an automatic game review. Move references in Codex answers are clickable and replay the board position before and after the cited move.
 - Optional Codex coach with four question shortcuts and a custom question. The app sends the current FEN, moves, and available engine results as text using `codex exec --ephemeral --sandbox read-only`.
 
 Games and settings are stored in `~/Library/Application Support/LearnChess/games.json`. The app does not upload games itself. Enabling the Codex coach sends the question and board context through the installed Codex CLI.
