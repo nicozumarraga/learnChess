@@ -8,18 +8,19 @@ enum MoveLinks {
     static func attributed(_ answer: String, moves: [SavedMove]) -> AttributedString {
         let source = answer as NSString
         let matches = pattern.matches(in: answer, range: NSRange(location: 0, length: source.length))
-        var result = AttributedString()
+        var markdown = ""
         var position = 0
         for match in matches {
             guard let ply = ply(for: match, source: source, moves: moves) else { continue }
-            result += AttributedString(source.substring(with: NSRange(location: position, length: match.range.location - position)))
-            var link = AttributedString(source.substring(with: match.range))
-            link.link = URL(string: "learnchess://move/\(ply)")
-            result += link
+            markdown += source.substring(with: NSRange(location: position, length: match.range.location - position))
+            markdown += "[\(source.substring(with: match.range))](learnchess://move/\(ply))"
             position = NSMaxRange(match.range)
         }
-        result += AttributedString(source.substring(from: position))
-        return result
+        markdown += source.substring(from: position)
+        return (try? AttributedString(markdown: markdown,
+                                      options: .init(interpretedSyntax: .full,
+                                                     failurePolicy: .returnPartiallyParsedIfPossible)))
+            ?? AttributedString(answer)
     }
 
     static func ply(from url: URL) -> Int? {

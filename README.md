@@ -13,7 +13,8 @@ The app icon source is [`Assets/AppIcon.png`](Assets/AppIcon.png); `scripts/buil
 - A local rating updated after every completed game, including games with live help. This is a personal progress indicator, not an official Elo rating. Previously completed assisted games are counted once when upgrading.
 - A collapsible sidebar and compact Focus view with a large board, recent moves, and a small status panel.
 - Completed games receive full-strength Stockfish move labels, including good, inaccuracy, mistake, and blunder. Brilliant and great are cautious heuristics, not official chess.com classifications. With Codex enabled, the app also writes an automatic game review. Move references in Codex answers are clickable and replay the board position before and after the cited move.
-- Optional Codex coach with four question shortcuts and a custom question. The app sends the current FEN, moves, and available engine results as text using `codex exec --ephemeral --sandbox read-only`.
+- From any blunder in a completed game, select **Try line** to see Stockfish's preferred move and play a short practice continuation against full-strength Stockfish. Practice is temporary and leaves the saved game and rating untouched.
+- Optional Codex coach with four question shortcuts and a custom question. Replies render simple Markdown, and each game's conversation is saved locally across app restarts. Recent turns are included in follow-up prompts, so the coach can answer questions about earlier replies. The app sends the current FEN, moves, conversation, and available engine results as text using `codex exec --ephemeral --sandbox read-only`.
 
 Games and settings are stored in `~/Library/Application Support/LearnChess/games.json`. The app does not upload games itself. Enabling the Codex coach sends the question and board context through the installed Codex CLI.
 

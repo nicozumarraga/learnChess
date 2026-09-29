@@ -69,6 +69,57 @@ import Foundation
         check(reviewLinks.runs.compactMap { $0.link.flatMap(MoveLinks.ply(from:)) } == [4],
               "postgame review links to the final move")
 
+        try! """
+        #!/bin/sh
+        prompt=$(cat)
+        case "$prompt" in
+          *"User: First question"*"Coach: **First answer**"*"Latest question: Follow up"*) printf '**Second answer** after 2...Qh4#';;
+          *"Latest question: First question"*) printf '**First answer** after 2...Qh4#';;
+          *) printf 'Unexpected conversation context';;
+        esac
+        """.write(to: mockCLI, atomically: true, encoding: .utf8)
+        try! FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: mockCLI.path)
+        postGame.askCoach("First question")
+        await waitUntil { !postGame.isAsking }
+        check(postGame.game?.coachTurns.map(\.role) == [.user, .assistant],
+              "coach saves the first exchange with the game")
+        postGame.askCoach("Follow up")
+        await waitUntil { !postGame.isAsking }
+        check(postGame.game?.coachTurns.last?.text == "**Second answer** after 2...Qh4#",
+              "follow-up receives previous user and coach turns")
+        let rendered = MoveLinks.attributed(postGame.game?.coachTurns.last?.text ?? "", moves: postGame.game?.moves ?? [])
+        check(String(rendered.characters).contains("Second answer") && !String(rendered.characters).contains("**"),
+              "coach Markdown is rendered")
+        check(rendered.runs.compactMap { $0.link.flatMap(MoveLinks.ply(from:)) } == [4],
+              "move links survive Markdown rendering")
+        let restored = try! JSONDecoder().decode(LocalData.self, from: JSONEncoder().encode(postGame.data))
+        check(GameModel(data: restored, autosave: false).game?.coachTurns.count == 4,
+              "coach conversation survives reopening the game")
+        postGame.startPractice(from: 1)
+        check(postGame.practice?.bestMove != nil && postGame.practice?.moves.isEmpty == true,
+              "practice starts before the reviewed move")
+        postGame.practiceSuggestedMove()
+        await waitUntil { postGame.practice?.moves.count == 2 && postGame.practice?.isThinking == false }
+        check(postGame.game?.moves.count == 4 && postGame.data.rating == 1200,
+              "practice reply leaves the saved game and rating untouched")
+        postGame.stopPractice()
+        check(postGame.practice == nil, "review resumes after practice stops")
+        postGame.startPractice(from: 1)
+        postGame.practiceSelect(ChessBoard.square("f2")!)
+        postGame.practiceSelect(ChessBoard.square("f3")!)
+        await waitUntil { postGame.practice?.moves.count == 2 && postGame.practice?.isThinking == false }
+        check(postGame.practice?.moves.first?.uci == "f2f3", "practice board accepts a chosen move")
+        if let next = postGame.practice?.board.legalMoves.first(where: { $0.promotion == nil }) {
+            postGame.practiceSelect(next.from)
+            postGame.practiceSelect(next.to)
+            await waitUntil { postGame.practice?.moves.count == 4 && postGame.practice?.isThinking == false }
+            check(postGame.game?.moves.count == 4, "several practice turns stay separate from the saved game")
+        } else { fail("practice has a second legal move") }
+        postGame.stopPractice()
+        postGame.clearCoachConversation()
+        check(postGame.game?.coachTurns.isEmpty == true && postGame.game?.postGameSummary != nil,
+              "clearing chat keeps the separate postgame review")
+
         let model = GameModel(data: initial, autosave: false)
         model.toggleAssistance()
         check(model.game?.liveHelp == true, "live help enabled")

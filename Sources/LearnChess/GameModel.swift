@@ -43,6 +43,29 @@ struct SavedMove: Codable, Identifiable, Sendable {
     var insight: MoveInsight? = nil
 }
 
+struct CoachTurn: Codable, Identifiable, Sendable {
+    enum Role: String, Codable, Sendable { case user, assistant }
+    var id = UUID()
+    var role: Role
+    var text: String
+}
+
+struct PracticeLine: Sendable {
+    let id = UUID()
+    let gameID: UUID
+    let originPly: Int
+    let side: Side
+    let startingMoves: [String]
+    let bestMove: ChessMove
+    let bestSAN: String
+    var board: ChessBoard
+    var moves: [SavedMove] = []
+    var selectedSquare: Int? = nil
+    var promotionChoices: [ChessMove] = []
+    var isThinking = false
+    var error: String? = nil
+}
+
 struct SavedGame: Codable, Identifiable, Sendable {
     var id = UUID()
     var startedAt = Date()
@@ -56,6 +79,7 @@ struct SavedGame: Codable, Identifiable, Sendable {
     var ratingChange: Int? = nil
     var analysisComplete = false
     var postGameSummary: String? = nil
+    var coachTurns: [CoachTurn] = []
     var title: String { "Stockfish · \(opponentElo)" }
 
     init(opponentElo: Int, assisted: Bool) {
@@ -64,7 +88,7 @@ struct SavedGame: Codable, Identifiable, Sendable {
     }
 
     private enum CodingKeys: String, CodingKey {
-        case id, startedAt, updatedAt, opponentElo, assisted, liveHelp, moves, result, ratingApplied, ratingChange, analysisComplete, postGameSummary
+        case id, startedAt, updatedAt, opponentElo, assisted, liveHelp, moves, result, ratingApplied, ratingChange, analysisComplete, postGameSummary, coachTurns
     }
 
     init(from decoder: Decoder) throws {
@@ -81,6 +105,7 @@ struct SavedGame: Codable, Identifiable, Sendable {
         ratingChange = try values.decodeIfPresent(Int.self, forKey: .ratingChange)
         analysisComplete = try values.decodeIfPresent(Bool.self, forKey: .analysisComplete) ?? false
         postGameSummary = try values.decodeIfPresent(String.self, forKey: .postGameSummary)
+        coachTurns = try values.decodeIfPresent([CoachTurn].self, forKey: .coachTurns) ?? []
     }
 }
 
@@ -139,8 +164,8 @@ enum GameStorage {
     @Published var analysis: EngineReply?
     @Published var postMoveReview: PostMoveReview?
     @Published var isReviewVisible = false
-    @Published var coachAnswer = ""
     @Published var coachQuestion = ""
+    @Published var practice: PracticeLine?
     @Published var isThinking = false
     @Published var isAnalyzing = false
     @Published var isAsking = false
@@ -215,7 +240,8 @@ enum GameStorage {
         analysis = nil
         postMoveReview = nil
         isReviewVisible = false
-        coachAnswer = ""
+        practice = nil
+        coachQuestion = ""
         isThinking = false
         panel = .play
         persist()
@@ -227,7 +253,8 @@ enum GameStorage {
         cursor = data.games[index].moves.count
         reconstructBoard()
         panel = .play
-        coachAnswer = ""
+        practice = nil
+        coachQuestion = ""
         analysis = nil
         postMoveReview = nil
         isReviewVisible = false
@@ -238,6 +265,7 @@ enum GameStorage {
     }
 
     func go(to ply: Int) {
+        practice = nil
         replayToken = UUID()
         replayMove = nil
         replayCaption = ""
@@ -402,7 +430,7 @@ enum GameStorage {
             analysis = nil
             postMoveReview = nil
             isReviewVisible = false
-            coachAnswer = ""
+            coachQuestion = ""
             if !isAtEnd { go(to: data.games[index].moves.count) }
         } else {
             data.games[index].assisted = true
@@ -522,7 +550,7 @@ enum GameStorage {
                         return "\(prefix)\(move.san) [\(move.uci)] — \(move.insight?.quality?.title ?? "unrated"), before=\(move.insight?.beforeScore.map(String.init) ?? "?"), after=\(move.insight?.afterScore.map(String.init) ?? "?") cp from White's perspective"
                     }.joined(separator: "\n")
                     let prompt = """
-                    Review this completed chess game for the White player. Result: \(result). Give a concise game summary, the main turning points, and 2-4 specific lessons. Cite actual moves using exact notation such as 16...Rg8 or 17.Bxh6 so the app can link them to the board. Use only the supplied moves and engine comparisons. The move labels are approximate Stockfish-based heuristics; do not claim certainty about brilliant or great moves. Do not invent variations, scores, or moves.
+                    Review this completed chess game for the White player. Result: \(result). Give a concise game summary, the main turning points, and 2-4 specific lessons. Cite actual moves using exact notation such as 16...Rg8 or 17.Bxh6 so the app can link them to the board. Do not create hyperlinks; the app adds move links. Use only the supplied moves and engine comparisons. The move labels are approximate Stockfish-based heuristics; do not claim certainty about brilliant or great moves. Do not invent variations, scores, or moves.
 
                     \(history)
                     """
@@ -550,6 +578,117 @@ enum GameStorage {
         return nil
     }
 
+    var practiceCanMove: Bool {
+        guard let practice else { return false }
+        return !practice.isThinking && practice.moves.count < 12 &&
+            practice.board.turn == practice.side && practice.board.outcome == nil
+    }
+
+    var practiceTargets: Set<Int> {
+        guard practiceCanMove, let practice, let square = practice.selectedSquare else { return [] }
+        return Set(practice.board.legalMoves.filter { $0.from == square }.map(\.to))
+    }
+
+    func startPractice(from ply: Int) {
+        guard let game, game.result != nil, game.moves.indices.contains(ply - 1),
+              let bestUCI = game.moves[ply - 1].insight?.bestMove,
+              let best = ChessBoard.move(bestUCI), hasEngine else { return }
+        var position = ChessBoard.initial
+        let prefix = game.moves.prefix(ply - 1).map(\.uci)
+        for uci in prefix {
+            guard let move = ChessBoard.move(uci), position.apply(move) else { return }
+        }
+        guard position.legalMoves.contains(best) else { return }
+        practice = PracticeLine(gameID: game.id, originPly: ply, side: position.turn,
+                                startingMoves: prefix, bestMove: best,
+                                bestSAN: position.san(for: best), board: position)
+        isFocusMode = false
+    }
+
+    func bestMoveSAN(for ply: Int) -> String? {
+        guard let game, game.moves.indices.contains(ply - 1),
+              let uci = game.moves[ply - 1].insight?.bestMove,
+              let best = ChessBoard.move(uci) else { return nil }
+        var position = ChessBoard.initial
+        for saved in game.moves.prefix(ply - 1) {
+            guard let move = ChessBoard.move(saved.uci), position.apply(move) else { return nil }
+        }
+        return position.legalMoves.contains(best) ? position.san(for: best) : nil
+    }
+
+    func stopPractice() { practice = nil }
+
+    func practiceSelect(_ square: Int) {
+        guard practiceCanMove, var session = practice else { return }
+        if let from = session.selectedSquare, practiceTargets.contains(square) {
+            let choices = session.board.legalMoves.filter { $0.from == from && $0.to == square }
+            session.selectedSquare = nil
+            if choices.count > 1 { session.promotionChoices = choices; practice = session }
+            else if let move = choices.first { makePracticeMove(move) }
+        } else {
+            session.selectedSquare = session.board.squares[square]?.side == session.side ? square : nil
+            practice = session
+        }
+    }
+
+    func practicePromote(to kind: Kind) {
+        guard let move = practice?.promotionChoices.first(where: { $0.promotion == kind }) else { return }
+        practice?.promotionChoices = []
+        makePracticeMove(move)
+    }
+
+    func cancelPracticePromotion() { practice?.promotionChoices = [] }
+
+    func practiceSuggestedMove() {
+        guard let practice, practice.moves.isEmpty else { return }
+        makePracticeMove(practice.bestMove)
+    }
+
+    private func makePracticeMove(_ move: ChessMove) {
+        guard practiceCanMove, var session = practice else { return }
+        let san = session.board.san(for: move)
+        guard session.board.apply(move) else { return }
+        session.moves.append(SavedMove(uci: move.uci, san: san))
+        session.selectedSquare = nil
+        session.promotionChoices = []
+        if session.board.outcome != nil || session.moves.count >= 12 {
+            practice = session
+            return
+        }
+        session.isThinking = true
+        let id = session.id
+        let expectedMoves = session.moves.map(\.uci)
+        let allMoves = session.startingMoves + expectedMoves
+        let path = data.enginePath
+        practice = session
+        Task {
+            do {
+                let reply = try await Task.detached {
+                    try EngineRunner.search(path: path, moves: allMoves, elo: nil, milliseconds: 700)
+                }.value
+                guard var current = practice, current.id == id,
+                      current.moves.map(\.uci) == expectedMoves,
+                      let uci = reply.bestMove, let answer = ChessBoard.move(uci) else { return }
+                let answerSAN = current.board.san(for: answer)
+                guard current.board.apply(answer) else { throw EngineError.noMove }
+                current.moves.append(SavedMove(uci: answer.uci, san: answerSAN))
+                current.isThinking = false
+                practice = current
+            } catch {
+                if practice?.id == id {
+                    practice?.isThinking = false
+                    practice?.error = error.localizedDescription
+                }
+            }
+        }
+    }
+
+    func clearCoachConversation() {
+        guard let index = activeIndex else { return }
+        data.games[index].coachTurns = []
+        persist()
+    }
+
     func askCoach(_ shortcut: String? = nil) {
         guard canUseCoach else { message = "Enable live help to use the coach during a game, or finish the game first."; return }
         guard !isAsking else { return }
@@ -560,15 +699,28 @@ enum GameStorage {
         let history = game.moves.prefix(cursor).enumerated().map {
             "\($0.offset / 2 + 1)\($0.offset.isMultiple(of: 2) ? "." : "...")\($0.element.san) [\($0.element.uci)]"
         }.joined(separator: "\n")
+        var context: [String] = []
+        var remaining = 24_000
+        for turn in game.coachTurns.reversed() {
+            let entry = "\(turn.role == .user ? "User" : "Coach"): \(turn.text)"
+            guard entry.count <= remaining else { break }
+            context.append(entry)
+            remaining -= entry.count
+        }
+        let conversation = context.reversed().joined(separator: "\n\n")
         let inspectedCount = postMoveReview == nil ? cursor : min(cursor + 1, game.moves.count)
         let insights = game.moves.prefix(inspectedCount).compactMap { move -> String? in
             guard let info = move.insight else { return nil }
             return "\(move.san): best=\(info.bestMove ?? "unknown"), before_cp=\(info.beforeScore.map(String.init) ?? "unknown"), after_cp=\(info.afterScore.map(String.init) ?? "unknown"), before_wdl=\(info.beforeWDL?.map(String.init).joined(separator: "/") ?? "unknown"), after_wdl=\(info.afterWDL?.map(String.init).joined(separator: "/") ?? "unknown")"
         }.joined(separator: "\n")
         let prompt = """
-        You are a concise chess coach. The user plays White against Stockfish. Explain ideas in plain language. Do not invent engine scores or claim a move is a mistake solely because it differs from the top engine move. Current-position Stockfish values are from the side to move. Saved before/after centipawn scores and WDL values are normalized to White's perspective; WDL is per mille (win/draw/loss). Give 2-4 practical sentences, then one concrete next idea.
+        You are a concise chess coach in an ongoing conversation. The user plays White against Stockfish. Answer the latest question using the prior conversation for references such as "that move". Explain ideas in plain language. Do not invent engine scores or claim a move is a mistake solely because it differs from the top engine move. Current-position Stockfish values are from the side to move. Saved before/after centipawn scores and WDL values are normalized to White's perspective; WDL is per mille (win/draw/loss). Use simple Markdown. Cite actual game moves in numbered SAN notation where useful. Do not create hyperlinks; the app adds move links.
 
-        Question: \(question)
+        Earlier postgame review: \(game.postGameSummary.map { String($0.prefix(5_000)) } ?? "none")
+        Conversation so far:
+        \(conversation.isEmpty ? "No earlier turns." : conversation)
+
+        Latest question: \(question)
         Current board FEN: \(board.fen)
         Most recent move review: \(postMoveReview.map { "played \($0.played), engine preferred \($0.best)" } ?? "none")
         Moves so far (SAN and UCI):
@@ -578,13 +730,28 @@ enum GameStorage {
         \(insights.isEmpty ? "None" : insights)
         """
         let path = data.codexPath
-        coachAnswer = ""
+        let id = game.id
+        let turn = CoachTurn(role: .user, text: question)
+        if let index = activeIndex {
+            data.games[index].coachTurns.append(turn)
+            persist()
+        }
+        coachQuestion = ""
         isAsking = true
         Task {
             do {
                 let response = try await Task.detached { try CodexCoach.ask(path: path, prompt: prompt, workingDirectory: GameStorage.directory) }.value
-                coachAnswer = response
-            } catch { message = error.localizedDescription }
+                if let index = data.games.firstIndex(where: { $0.id == id }) {
+                    data.games[index].coachTurns.append(CoachTurn(role: .assistant, text: response))
+                    persist()
+                }
+            } catch {
+                if let index = data.games.firstIndex(where: { $0.id == id }) {
+                    data.games[index].coachTurns.removeAll(where: { $0.id == turn.id })
+                    persist()
+                }
+                message = error.localizedDescription
+            }
             isAsking = false
         }
     }

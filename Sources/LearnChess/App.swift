@@ -78,6 +78,15 @@ private struct RootView: View {
             Button("Bishop") { model.promote(to: .bishop) }
             Button("Knight") { model.promote(to: .knight) }
         }
+        .confirmationDialog("Promote in practice", isPresented: Binding(
+            get: { model.practice?.promotionChoices.isEmpty == false },
+            set: { if !$0 { model.cancelPracticePromotion() } }
+        )) {
+            Button("Queen") { model.practicePromote(to: .queen) }
+            Button("Rook") { model.practicePromote(to: .rook) }
+            Button("Bishop") { model.practicePromote(to: .bishop) }
+            Button("Knight") { model.practicePromote(to: .knight) }
+        }
     }
 
     private var sidebar: some View {
@@ -404,11 +413,26 @@ private struct PlayView: View {
                             Text("None").font(.system(size: 11)).foregroundStyle(Theme.muted)
                         } else {
                             ForEach(entries, id: \.element.id) { entry in
-                                Button { model.replay(entry.offset + 1) } label: {
-                                    Text("\(entry.offset / 2 + 1)\(entry.offset.isMultiple(of: 2) ? "." : "...")\(entry.element.san)")
-                                        .font(.system(size: 12, design: .monospaced))
+                                VStack(alignment: .leading, spacing: 6) {
+                                    HStack(spacing: 10) {
+                                        Button { model.replay(entry.offset + 1) } label: {
+                                            Text("\(entry.offset / 2 + 1)\(entry.offset.isMultiple(of: 2) ? "." : "...")\(entry.element.san)")
+                                                .font(.system(size: 12, design: .monospaced))
+                                        }
+                                        .buttonStyle(.plain).foregroundStyle(Theme.accent)
+                                        if quality == .blunder {
+                                            Button("Try line") { model.startPractice(from: entry.offset + 1) }
+                                                .buttonStyle(.plain).font(.system(size: 11, weight: .semibold))
+                                                .foregroundStyle(Theme.accent)
+                                        }
+                                    }
+                                    if quality == .blunder, let best = model.bestMoveSAN(for: entry.offset + 1) {
+                                        Text("Best: \(best)").font(.system(size: 11)).foregroundStyle(Theme.muted)
+                                    }
+                                    if model.practice?.originPly == entry.offset + 1 {
+                                        practiceView
+                                    }
                                 }
-                                .buttonStyle(.plain).foregroundStyle(Theme.accent)
                             }
                         }
                     } label: {
@@ -429,6 +453,47 @@ private struct PlayView: View {
         .cardStyle()
     }
 
+    private var practiceView: some View {
+        VStack(alignment: .leading, spacing: 9) {
+            if let practice = model.practice {
+                Text("PRACTICE LINE · YOU PLAY \(practice.side == .white ? "WHITE" : "BLACK")")
+                    .font(.system(size: 10, weight: .bold)).tracking(1.1).foregroundStyle(Theme.muted)
+                Text(practice.moves.isEmpty ? "Try \(practice.bestSAN), or choose another move." :
+                     practice.isThinking ? "Stockfish is replying…" :
+                     practice.moves.count >= 12 || practice.board.outcome != nil ? "Line complete. Restart or return to the review." :
+                     "Play another move, or return to the review.")
+                    .font(.system(size: 11)).foregroundStyle(Theme.text)
+                ChessBoardView(previewBoard: practice.board,
+                               previewMove: practice.moves.isEmpty ? practice.bestMove : nil,
+                               interactive: false,
+                               onSquareTap: { model.practiceSelect($0) },
+                               highlightedSquare: practice.selectedSquare,
+                               targetSquares: model.practiceTargets)
+                    .frame(width: 250, height: 250)
+                    .frame(maxWidth: .infinity)
+                if !practice.moves.isEmpty {
+                    Text(practice.moves.map(\.san).joined(separator: "  "))
+                        .font(.system(size: 11, design: .monospaced)).foregroundStyle(Theme.muted)
+                }
+                if let error = practice.error { Text(error).font(.system(size: 11)).foregroundStyle(.orange) }
+                HStack(spacing: 12) {
+                    if practice.moves.isEmpty {
+                        Button("Play \(practice.bestSAN)") { model.practiceSuggestedMove() }
+                            .disabled(!model.practiceCanMove)
+                    } else {
+                        Button("Restart line") { model.startPractice(from: practice.originPly) }
+                    }
+                    Button("Stop practice") { model.stopPractice() }
+                }
+                .buttonStyle(.plain).font(.system(size: 11, weight: .semibold)).foregroundStyle(Theme.accent)
+                Text("Up to six moves each · this line does not change the saved game or rating.")
+                    .font(.system(size: 10)).foregroundStyle(Theme.muted)
+            }
+        }
+        .padding(10)
+        .background(Theme.background, in: RoundedRectangle(cornerRadius: 9))
+    }
+
     private func coachCard(scrollToMoves: @escaping () -> Void) -> some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack {
@@ -436,7 +501,7 @@ private struct PlayView: View {
                 Spacer()
                 Image(systemName: "sparkles").foregroundStyle(Theme.accent)
             }
-            if model.game?.postGameSummary != nil || !model.coachAnswer.isEmpty {
+            if model.game?.postGameSummary != nil || model.game?.coachTurns.isEmpty == false {
                 Button("Back to moves ↑", action: scrollToMoves)
                     .buttonStyle(.plain).font(.system(size: 11, weight: .semibold)).foregroundStyle(Theme.accent)
             }
@@ -446,6 +511,26 @@ private struct PlayView: View {
             } else if model.isPostGameAnalyzing && model.game?.result != nil {
                 ProgressView(model.analysisProgress).font(.system(size: 11))
             }
+            if let turns = model.game?.coachTurns, !turns.isEmpty {
+                HStack {
+                    Text("CONVERSATION").font(.system(size: 10, weight: .bold)).tracking(1.4).foregroundStyle(Theme.muted)
+                    Spacer()
+                    Button("Clear chat") { model.clearCoachConversation() }
+                        .buttonStyle(.plain).font(.system(size: 11)).foregroundStyle(Theme.muted)
+                        .disabled(model.isAsking)
+                }
+                ForEach(turns) { turn in
+                    if turn.role == .user {
+                        Text(turn.text)
+                            .font(.system(size: 12, weight: .medium))
+                            .padding(11).frame(maxWidth: .infinity, alignment: .trailing)
+                            .background(Theme.background, in: RoundedRectangle(cornerRadius: 9))
+                    } else {
+                        linkedAnswer(turn.text)
+                    }
+                }
+            }
+            if model.isAsking { ProgressView("Thinking with Codex…").font(.system(size: 12)) }
             Text("Ask about the position, a move, or your plan.")
                 .font(.system(size: 12)).foregroundStyle(Theme.muted)
             ForEach(["Explain the best move", "Why was my last move weak?", "Analyze this board", "Review my earlier mistakes"], id: \.self) { question in
@@ -463,10 +548,6 @@ private struct PlayView: View {
             }
             .padding(10)
             .background(Theme.background, in: RoundedRectangle(cornerRadius: 9))
-            if model.isAsking { ProgressView("Thinking with Codex…").font(.system(size: 12)) }
-            if !model.coachAnswer.isEmpty {
-                linkedAnswer(model.coachAnswer)
-            }
             if !model.data.coachEnabled {
                 Text("Enable the coach in Settings.").font(.system(size: 11)).foregroundStyle(Theme.muted)
             } else if !model.canUseCoach {
@@ -616,6 +697,9 @@ private struct ChessBoardView: View {
     var previewBoard: ChessBoard? = nil
     var previewMove: ChessMove? = nil
     var interactive = true
+    var onSquareTap: ((Int) -> Void)? = nil
+    var highlightedSquare: Int? = nil
+    var targetSquares: Set<Int> = []
 
     var body: some View {
         GeometryReader { geo in
@@ -627,11 +711,16 @@ private struct ChessBoardView: View {
                     HStack(spacing: 0) {
                         ForEach(0..<8, id: \.self) { file in
                             let square = rank * 8 + file
-                            Button { if interactive { model.select(square) } } label: {
+                            Button {
+                                if let onSquareTap { onSquareTap(square) }
+                                else if interactive { model.select(square) }
+                            } label: {
                                 ZStack {
                                     Rectangle().fill((rank + file).isMultiple(of: 2) ? Theme.darkSquare : Theme.lightSquare)
-                                    if interactive && model.selectedSquare == square { Rectangle().fill(Color.yellow.opacity(0.35)) }
-                                    if interactive && model.legalTargets.contains(square) {
+                                    if (onSquareTap != nil ? highlightedSquare == square : interactive && model.selectedSquare == square) {
+                                        Rectangle().fill(Color.yellow.opacity(0.35))
+                                    }
+                                    if (onSquareTap != nil ? targetSquares.contains(square) : interactive && model.legalTargets.contains(square)) {
                                         Circle().fill(Color.black.opacity(0.23)).frame(width: tile * 0.24)
                                     }
                                     if let piece = displayedBoard.squares[square] {
