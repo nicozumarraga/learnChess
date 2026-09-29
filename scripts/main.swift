@@ -28,6 +28,15 @@ board = .initial
 for move in ["e2e4", "a7a6", "e4e5", "d7d5"] { check(board.apply(ChessBoard.move(move)!), "play \(move)") }
 check(board.apply(ChessBoard.move("e5d6")!), "en passant capture")
 check(board.squares[ChessBoard.square("d5")!] == nil, "captured pawn removed")
+let enPassantLedger = CaptureLedger(moves: ["e2e4", "a7a6", "e4e5", "d7d5", "e5d6"])
+check(enPassantLedger.takenByWhite == [.pawn] && enPassantLedger.points(by: .white) == 1,
+      "en passant counts as a captured pawn")
+check(enPassantLedger.lead(for: .white) == 1, "capture lead uses piece points")
+let exchangeLedger = CaptureLedger(moves: ["e2e4", "d7d5", "e4d5", "d8d5"])
+check(exchangeLedger.takenByWhite == [.pawn] && exchangeLedger.takenByBlack == [.pawn],
+      "capture display includes both players")
+check(exchangeLedger.lead(for: .white) == 0 && exchangeLedger.lead(for: .black) == 0,
+      "equal captures clear the material lead")
 
 board = .initial
 for move in ["e2e4", "e7e5", "g1f3", "b8c6", "f1c4", "g8f6"] { check(board.apply(ChessBoard.move(move)!), "play \(move)") }

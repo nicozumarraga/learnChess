@@ -8,6 +8,15 @@ enum Side: String, Codable, Sendable {
 enum Kind: String, Codable, Sendable {
     case king = "k", queen = "q", rook = "r", bishop = "b", knight = "n", pawn = "p"
     var symbol: String { rawValue.uppercased() }
+    var materialPoints: Int {
+        switch self {
+        case .pawn: 1
+        case .knight, .bishop: 3
+        case .rook: 5
+        case .queen: 9
+        case .king: 0
+        }
+    }
 }
 
 struct Piece: Codable, Equatable, Sendable {
@@ -27,6 +36,33 @@ struct ChessMove: Codable, Equatable, Hashable, Sendable {
     var uci: String {
         ChessBoard.squareName(from) + ChessBoard.squareName(to) + (promotion?.rawValue ?? "")
     }
+}
+
+struct CaptureLedger: Sendable {
+    private(set) var takenByWhite: [Kind] = []
+    private(set) var takenByBlack: [Kind] = []
+
+    init(moves: [String]) {
+        var board = ChessBoard.initial
+        for uci in moves {
+            guard let move = ChessBoard.move(uci), let moving = board.squares[move.from] else { break }
+            let victim: Piece?
+            if moving.kind == .pawn && board.enPassant == move.to && board.squares[move.to] == nil {
+                victim = board.squares[move.to + (moving.side == .white ? -8 : 8)]
+            } else {
+                victim = board.squares[move.to]
+            }
+            guard board.apply(move) else { break }
+            if let victim {
+                if moving.side == .white { takenByWhite.append(victim.kind) }
+                else { takenByBlack.append(victim.kind) }
+            }
+        }
+    }
+
+    func taken(by side: Side) -> [Kind] { side == .white ? takenByWhite : takenByBlack }
+    func points(by side: Side) -> Int { taken(by: side).reduce(0) { $0 + $1.materialPoints } }
+    func lead(for side: Side) -> Int { points(by: side) - points(by: side.other) }
 }
 
 struct ChessBoard: Sendable {

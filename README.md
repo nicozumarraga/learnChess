@@ -7,6 +7,7 @@ The app icon source is [`Assets/AppIcon.png`](Assets/AppIcon.png); `scripts/buil
 ## Features
 
 - Legal chess moves, checkmate and stalemate detection, SAN move list, board navigation, and saved games that reopen at the last move.
+- Captured pieces and points (pawn 1, knight/bishop 3, rook 5, queen 9) beside each player, with a `+N` lead for the side that has captured more. The display follows game review and temporary practice lines.
 - Stockfish play with a selectable 1320–3190 engine Elo setting, plus full strength analysis, best move, score, and win/draw/loss estimate.
 - Best move arrows on the board, including an L-shaped arrow for knight moves.
 - Optional live help prepares a comparison after you move. Select **Review last move** to reveal the earlier position and arrow in a small review board; the main board stays playable. **Show hint** reveals the current best move before you play. Games without live help keep hints and coaching unavailable until completion.

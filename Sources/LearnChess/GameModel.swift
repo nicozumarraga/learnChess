@@ -199,6 +199,11 @@ enum GameStorage {
     var hasEngine: Bool { FileManager.default.isExecutableFile(atPath: data.enginePath) }
     var isPostGameAnalyzing: Bool { analyzingGameID == activeID }
     var displayedBoard: ChessBoard { practice?.board ?? board }
+    var captureLedger: CaptureLedger {
+        let moves = practice.map { $0.startingMoves + $0.moves.map(\.uci) }
+            ?? game?.moves.prefix(cursor).map(\.uci) ?? []
+        return CaptureLedger(moves: moves)
+    }
 
     private func reconcileRatingPolicy() {
         guard data.ratingPolicyVersion < 1 else { return }

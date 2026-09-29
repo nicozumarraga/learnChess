@@ -42,6 +42,37 @@ import Foundation
         initial.games = []
         check(!initial.enginePath.isEmpty, "Stockfish installed for live-help check")
 
+        var captureGame = SavedGame(opponentElo: 1320, assisted: false)
+        var captureBoard = ChessBoard.initial
+        for uci in ["e2e4", "d7d5", "e4d5", "d8d5"] {
+            let move = ChessBoard.move(uci)!
+            captureGame.moves.append(SavedMove(uci: uci, san: captureBoard.san(for: move)))
+            check(captureBoard.apply(move), "capture example move is legal")
+        }
+        var captureData = initial
+        captureData.games = [captureGame]
+        let captureModel = GameModel(data: captureData, autosave: false)
+        check(captureModel.captureLedger.points(by: .white) == 1 && captureModel.captureLedger.points(by: .black) == 1,
+              "current game shows both capture totals")
+        captureModel.go(to: 3)
+        check(captureModel.captureLedger.lead(for: .white) == 1,
+              "reviewing earlier moves updates the capture lead")
+        captureModel.go(to: 2)
+        check(captureModel.captureLedger.points(by: .white) == 0,
+              "reviewing before a capture hides later captured pieces")
+        var beforeRecapture = ChessBoard.initial
+        for uci in ["e2e4", "d7d5", "e4d5"] { _ = beforeRecapture.apply(ChessBoard.move(uci)!) }
+        let recapture = ChessBoard.move("d8d5")!
+        var practiceCapture = PracticeLine(gameID: captureGame.id, originPly: 4, side: .white,
+                                           startingMoves: ["e2e4", "d7d5", "e4d5"],
+                                           bestMove: recapture, bestSAN: "Qxd5", board: beforeRecapture)
+        _ = practiceCapture.board.apply(recapture)
+        practiceCapture.moves = [SavedMove(uci: recapture.uci, san: "Qxd5")]
+        captureModel.practice = practiceCapture
+        check(captureModel.captureLedger.lead(for: .white) == 0,
+              "practice line uses its own captured pieces")
+        captureModel.stopPractice()
+
         var finished = SavedGame(opponentElo: 1320, assisted: false)
         var position = ChessBoard.initial
         for uci in ["f2f3", "e7e5", "g2g4", "d8h4"] {

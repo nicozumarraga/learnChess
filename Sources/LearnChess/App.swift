@@ -38,6 +38,33 @@ private extension MoveQuality {
     }
 }
 
+private struct CapturesView: View {
+    let side: Side
+    let ledger: CaptureLedger
+    var compact = false
+
+    var body: some View {
+        let kinds = ledger.taken(by: side).sorted { $0.materialPoints > $1.materialPoints }
+        let glyphs = kinds.map { Piece(side: side.other, kind: $0).glyph }.joined()
+        let points = ledger.points(by: side)
+        let lead = ledger.lead(for: side)
+        HStack(spacing: 5) {
+            if !glyphs.isEmpty {
+                Text(glyphs)
+                    .font(.system(size: compact ? 13 : 15))
+                    .foregroundStyle(Theme.text)
+                    .lineLimit(1).minimumScaleFactor(0.7)
+            }
+            Text("\(points) pts").foregroundStyle(Theme.muted)
+            if lead > 0 {
+                Text("+\(lead)").fontWeight(.semibold).foregroundStyle(Theme.accent)
+            }
+        }
+        .font(.system(size: compact ? 10 : 11))
+        .help("\(side == .white ? "You" : "Stockfish") captured \(kinds.count) pieces worth \(points) points\(lead > 0 ? ", ahead by \(lead)" : "").")
+    }
+}
+
 @main struct LearnChessApp: App {
     @StateObject private var model = GameModel()
     var body: some Scene {
@@ -200,12 +227,12 @@ private struct PlayView: View {
             GeometryReader { space in
               HStack(alignment: .top, spacing: 24) {
                 VStack(spacing: 12) {
-                    playerStrip(name: "Stockfish", detail: "\(model.game?.opponentElo ?? model.data.opponentElo) Elo", symbol: "cpu", active: model.board.turn == .black)
+                    playerStrip(name: "Stockfish", detail: "\(model.game?.opponentElo ?? model.data.opponentElo) Elo", symbol: "cpu", side: .black, active: model.board.turn == .black)
                     ChessBoardView()
                     if !model.replayCaption.isEmpty {
                         Text(model.replayCaption).font(.system(size: 12, weight: .semibold)).foregroundStyle(Theme.accent)
                     }
-                    playerStrip(name: "You", detail: "\(model.data.rating) local Elo", symbol: "person.fill", active: model.board.turn == .white)
+                    playerStrip(name: "You", detail: "\(model.data.rating) local Elo", symbol: "person.fill", side: .white, active: model.board.turn == .white)
                     HStack(spacing: 10) {
                         if let practice = model.practice {
                             Text("PRACTICE LINE · \(practice.moves.count) PLY")
@@ -248,13 +275,14 @@ private struct PlayView: View {
         .padding(28)
     }
 
-    private func playerStrip(name: String, detail: String, symbol: String, active: Bool) -> some View {
+    private func playerStrip(name: String, detail: String, symbol: String, side: Side, active: Bool) -> some View {
         HStack(spacing: 12) {
             Image(systemName: symbol).font(.system(size: 18)).frame(width: 38, height: 38)
                 .background(Theme.panel, in: RoundedRectangle(cornerRadius: 10))
             VStack(alignment: .leading, spacing: 2) {
                 Text(name).font(.system(size: 14, weight: .semibold))
                 Text(detail).font(.system(size: 11)).foregroundStyle(Theme.muted)
+                CapturesView(side: side, ledger: model.captureLedger)
             }
             Spacer()
             if active && model.game?.result == nil {
@@ -595,6 +623,7 @@ private struct FocusPlayView: View {
                 HStack {
                     Text("STOCKFISH").font(.system(size: 11, weight: .bold)).tracking(1.2)
                     Text("\(model.game?.opponentElo ?? model.data.opponentElo)").font(.system(size: 11)).foregroundStyle(Theme.muted)
+                    CapturesView(side: .black, ledger: model.captureLedger, compact: true)
                     Spacer()
                     if model.isThinking { ProgressView().controlSize(.small) }
                 }
@@ -606,6 +635,7 @@ private struct FocusPlayView: View {
                 HStack {
                     Text("YOU").font(.system(size: 11, weight: .bold)).tracking(1.2)
                     Text("\(model.data.rating)").font(.system(size: 11)).foregroundStyle(Theme.muted)
+                    CapturesView(side: .white, ledger: model.captureLedger, compact: true)
                     Spacer()
                     Text(model.game?.result ?? (model.board.turn == .white ? "Your move" : "Thinking…"))
                         .font(.system(size: 11, weight: .medium)).foregroundStyle(Theme.accent)
