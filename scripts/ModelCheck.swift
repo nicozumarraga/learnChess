@@ -116,6 +116,19 @@ import Foundation
             check(postGame.game?.moves.count == 4, "several practice turns stay separate from the saved game")
         } else { fail("practice has a second legal move") }
         postGame.stopPractice()
+        postGame.startPractice(from: 2)
+        check(postGame.practice?.side == .white && postGame.practice?.moves.count == 1 &&
+              postGame.displayedBoard.fen == postGame.practice?.board.fen && postGame.practiceCanMove,
+              "a Black blunder starts after Stockfish's better move with White to play")
+        if let reply = postGame.practice?.board.legalMoves.first(where: { $0.promotion == nil }) {
+            postGame.practiceSelect(reply.from)
+            postGame.practiceSelect(reply.to)
+            await waitUntil { postGame.practice?.moves.count == 3 && postGame.practice?.isThinking == false }
+            check(postGame.game?.moves.count == 4, "Black-blunder practice leaves the saved review unchanged")
+        } else { fail("White can respond to the improved Black move") }
+        postGame.stopPractice()
+        check(postGame.displayedBoard.fen == postGame.board.fen,
+              "large board returns to saved review when practice ends")
         postGame.clearCoachConversation()
         check(postGame.game?.coachTurns.isEmpty == true && postGame.game?.postGameSummary != nil,
               "clearing chat keeps the separate postgame review")

@@ -207,12 +207,20 @@ private struct PlayView: View {
                     }
                     playerStrip(name: "You", detail: "\(model.data.rating) local Elo", symbol: "person.fill", active: model.board.turn == .white)
                     HStack(spacing: 10) {
-                        Button { model.go(to: 0) } label: { Image(systemName: "backward.end.fill") }
-                        Button { model.go(to: model.cursor - 1) } label: { Image(systemName: "chevron.left") }
-                        Text("\(model.cursor) / \(model.game?.moves.count ?? 0) plies").font(.system(size: 12, design: .monospaced)).foregroundStyle(Theme.muted)
-                            .frame(minWidth: 80)
-                        Button { model.go(to: model.cursor + 1) } label: { Image(systemName: "chevron.right") }
-                        Button { model.go(to: model.game?.moves.count ?? 0) } label: { Image(systemName: "forward.end.fill") }
+                        if let practice = model.practice {
+                            Text("PRACTICE LINE · \(practice.moves.count) PLY")
+                                .font(.system(size: 11, weight: .semibold)).foregroundStyle(Theme.accent)
+                            Spacer()
+                            Button("Return to review") { model.stopPractice() }
+                                .foregroundStyle(Theme.accent)
+                        } else {
+                            Button { model.go(to: 0) } label: { Image(systemName: "backward.end.fill") }
+                            Button { model.go(to: model.cursor - 1) } label: { Image(systemName: "chevron.left") }
+                            Text("\(model.cursor) / \(model.game?.moves.count ?? 0) plies").font(.system(size: 12, design: .monospaced)).foregroundStyle(Theme.muted)
+                                .frame(minWidth: 80)
+                            Button { model.go(to: model.cursor + 1) } label: { Image(systemName: "chevron.right") }
+                            Button { model.go(to: model.game?.moves.count ?? 0) } label: { Image(systemName: "forward.end.fill") }
+                        }
                     }
                     .buttonStyle(.plain)
                     .foregroundStyle(Theme.muted)
@@ -266,7 +274,8 @@ private struct PlayView: View {
                 Spacer()
                 Text(model.game?.result ?? "Live").font(.system(size: 11, weight: .semibold)).foregroundStyle(Theme.accent)
             }
-            Text(model.game?.result == nil ? (model.isAtEnd ? (model.isThinking ? "Stockfish is choosing a move…" : model.postMoveReview != nil ? "Your move. Last-move review is ready." : "Your move. Take your time.") : "Reviewing an earlier position") : "Review your game and learn from it.")
+            Text(model.practice != nil ? "Practice line active. Play White on either board; Stockfish replies." :
+                 model.game?.result == nil ? (model.isAtEnd ? (model.isThinking ? "Stockfish is choosing a move…" : model.postMoveReview != nil ? "Your move. Last-move review is ready." : "Your move. Take your time.") : "Reviewing an earlier position") : "Review your game and learn from it.")
                 .font(.system(size: 15, weight: .medium))
             if let change = model.game?.ratingChange {
                 Text("Local rating \(String(format: "%+d", change)) · now \(model.data.rating)")
@@ -456,9 +465,11 @@ private struct PlayView: View {
     private var practiceView: some View {
         VStack(alignment: .leading, spacing: 9) {
             if let practice = model.practice {
-                Text("PRACTICE LINE · YOU PLAY \(practice.side == .white ? "WHITE" : "BLACK")")
+                Text("PRACTICE LINE · YOU PLAY WHITE")
                     .font(.system(size: 10, weight: .bold)).tracking(1.1).foregroundStyle(Theme.muted)
-                Text(practice.moves.isEmpty ? "Try \(practice.bestSAN), or choose another move." :
+                Text(practice.originPly.isMultiple(of: 2) && practice.moves.count == 1 ?
+                     "Stockfish would play \(practice.bestSAN) instead. Your move." :
+                     practice.moves.isEmpty ? "Try \(practice.bestSAN), or choose another move." :
                      practice.isThinking ? "Stockfish is replying…" :
                      practice.moves.count >= 12 || practice.board.outcome != nil ? "Line complete. Restart or return to the review." :
                      "Play another move, or return to the review.")
@@ -486,7 +497,7 @@ private struct PlayView: View {
                     Button("Stop practice") { model.stopPractice() }
                 }
                 .buttonStyle(.plain).font(.system(size: 11, weight: .semibold)).foregroundStyle(Theme.accent)
-                Text("Up to six moves each · this line does not change the saved game or rating.")
+                Text("Play on either board · this line does not change the saved game or rating.")
                     .font(.system(size: 10)).foregroundStyle(Theme.muted)
             }
         }
@@ -705,7 +716,15 @@ private struct ChessBoardView: View {
         GeometryReader { geo in
             let size = min(geo.size.width, geo.size.height)
             let tile = size / 8
-            let displayedBoard = previewBoard ?? model.board
+            let usesPractice = previewBoard == nil && onSquareTap == nil && interactive && model.practice != nil
+            let displayedBoard = previewBoard ?? model.displayedBoard
+            let selected = onSquareTap != nil ? highlightedSquare :
+                usesPractice ? model.practice?.selectedSquare : interactive ? model.selectedSquare : nil
+            let targets = onSquareTap != nil ? targetSquares :
+                usesPractice ? model.practiceTargets : interactive ? model.legalTargets : []
+            let arrow = previewBoard != nil ? previewMove :
+                usesPractice ? (model.practice?.moves.isEmpty == true ? model.practice?.bestMove : nil) :
+                (model.replayMove ?? ChessBoard.move(model.analysis?.bestMove ?? ""))
             VStack(spacing: 0) {
                 ForEach((0..<8).reversed(), id: \.self) { rank in
                     HStack(spacing: 0) {
@@ -713,14 +732,15 @@ private struct ChessBoardView: View {
                             let square = rank * 8 + file
                             Button {
                                 if let onSquareTap { onSquareTap(square) }
+                                else if usesPractice { model.practiceSelect(square) }
                                 else if interactive { model.select(square) }
                             } label: {
                                 ZStack {
                                     Rectangle().fill((rank + file).isMultiple(of: 2) ? Theme.darkSquare : Theme.lightSquare)
-                                    if (onSquareTap != nil ? highlightedSquare == square : interactive && model.selectedSquare == square) {
+                                    if selected == square {
                                         Rectangle().fill(Color.yellow.opacity(0.35))
                                     }
-                                    if (onSquareTap != nil ? targetSquares.contains(square) : interactive && model.legalTargets.contains(square)) {
+                                    if targets.contains(square) {
                                         Circle().fill(Color.black.opacity(0.23)).frame(width: tile * 0.24)
                                     }
                                     if let piece = displayedBoard.squares[square] {
@@ -751,7 +771,7 @@ private struct ChessBoardView: View {
             .overlay(RoundedRectangle(cornerRadius: 12).stroke(Theme.border, lineWidth: 1))
             .frame(width: size, height: size)
             .overlay {
-                if let move = previewBoard == nil ? (model.replayMove ?? ChessBoard.move(model.analysis?.bestMove ?? "")) : previewMove,
+                if let move = arrow,
                    displayedBoard.legalMoves.contains(move) {
                     BestMoveArrow(move: move, isKnight: displayedBoard.squares[move.from]?.kind == .knight, size: size)
                         .allowsHitTesting(false)

@@ -198,6 +198,7 @@ enum GameStorage {
     var canUseCoach: Bool { data.coachEnabled && canAnalyzePosition }
     var hasEngine: Bool { FileManager.default.isExecutableFile(atPath: data.enginePath) }
     var isPostGameAnalyzing: Bool { analyzingGameID == activeID }
+    var displayedBoard: ChessBoard { practice?.board ?? board }
 
     private func reconcileRatingPolicy() {
         guard data.ratingPolicyVersion < 1 else { return }
@@ -599,9 +600,15 @@ enum GameStorage {
             guard let move = ChessBoard.move(uci), position.apply(move) else { return }
         }
         guard position.legalMoves.contains(best) else { return }
-        practice = PracticeLine(gameID: game.id, originPly: ply, side: position.turn,
+        let bestSAN = position.san(for: best)
+        var line = PracticeLine(gameID: game.id, originPly: ply, side: .white,
                                 startingMoves: prefix, bestMove: best,
-                                bestSAN: position.san(for: best), board: position)
+                                bestSAN: bestSAN, board: position)
+        if position.turn == .black {
+            guard line.board.apply(best) else { return }
+            line.moves.append(SavedMove(uci: best.uci, san: bestSAN))
+        }
+        practice = line
         isFocusMode = false
     }
 
